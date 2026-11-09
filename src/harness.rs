@@ -32,6 +32,66 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
+/// Resolves the editable harness bundle for this process.
+///
+/// `GOON_HARNESS_BUNDLE` wins over `config.evolve.bundle`; the value is either a path to a
+/// bundle directory (eval snapshots) or a bundle id in the evolution store.
+fn load_harness_bundle(config: &RuntimeConfig) -> (Option<String>, Option<Arc<crate::evolve::bundle::HarnessContext>>) {
+    let spec = std::env::var("GOON_HARNESS_BUNDLE").ok().filter(|value| !value.trim().is_empty()).or_else(|| config.evolve.bundle.clone());
+    let Some(spec) = spec else { return (None, None) };
+    let as_path = std::path::PathBuf::from(&spec);
+    let files = if as_path.is_dir() {
+        crate::evolve::bundle::load_files(&as_path)
+    } else {
+        let store = crate::evolve::store::HarnessStore::new(crate::evolve::state_root(&config.data_dir));
+        store.component_files(&spec)
+    };
+    match files {
+        Ok(files) if !files.is_empty() => (Some(spec), Some(Arc::new(crate::evolve::bundle::context(&files)))),
+        _ => (None, None),
+    }
+}
+
+/// Prompt block contributed by the editable bundle: skills, tool guidance, middleware, memory.
+fn render_bundle(ctx: &crate::evolve::bundle::HarnessContext) -> String {
+    let mut out = String::new();
+    if !ctx.tool_guidance.trim().is_empty() {
+        out.push_str("\n\n<harness:tool-guidance>\n");
+        out.push_str(ctx.tool_guidance.trim());
+        out.push_str("\n</harness:tool-guidance>");
+    }
+    if !ctx.middleware.is_empty() {
+        out.push_str("\n\n<harness:rules>\n");
+        for rule in &ctx.middleware {
+            out.push_str("- ");
+            out.push_str(rule.trim());
+            out.push('\n');
+        }
+        out.push_str("</harness:rules>");
+    }
+    if !ctx.memory_notes.is_empty() {
+        out.push_str("\n\n<harness:memory>\n");
+        for note in &ctx.memory_notes {
+            out.push_str("- ");
+            out.push_str(note.trim());
+            out.push('\n');
+        }
+        out.push_str("</harness:memory>");
+    }
+    if !ctx.skills.is_empty() {
+        out.push_str("\n\n<harness:skills>\n");
+        for (name, body) in &ctx.skills {
+            out.push_str(&format!("## {name}\n{}\n", body.trim()));
+        }
+        out.push_str("</harness:skills>");
+    }
+    if !ctx.system_append.trim().is_empty() {
+        out.push_str("\n\n<harness:policy>\n");
+        out.push_str(ctx.system_append.trim());
+        out.push_str("\n</harness:policy>");
+    }
+    out
+}
 
 pub fn noop_emit() -> Emit {
     Arc::new(|_| {})
@@ -366,6 +426,10 @@ pub struct Harness {
     /// Background memory deliveries (events, patch reindex) awaited before a run returns, so
     /// the store has seen everything a run produced (the TS single-writer chain guarantee).
     memory_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Editable harness bundle applied to this process, if any (`--bundle` / env).
+    pub harness_bundle: Option<Arc<crate::evolve::bundle::HarnessContext>>,
+    /// Id of the applied bundle (`None` when the built-in harness runs unchanged).
+    pub harness_bundle_id: Option<String>,
 }
 
 /// Mirrors goal time/token usage for the active turn; `allow_stopped` also flushes paused goals.
@@ -484,6 +548,16 @@ impl Harness {
             let emit_p = emit.clone();
             cbs.on_plan_exit = Some(Arc::new(move |plan| emit_p(json!({ "type": "plan_exit", "plan": plan }))));
         }
+        let (bundle_id, harness_bundle) = load_harness_bundle(&config);
+        let config = match (&harness_bundle, bundle_id.as_deref()) {
+            (Some(ctx), _) => {
+                let mut runtime = (*config).clone();
+                let profile = crate::evolve::profile::from_context(ctx, crate::evolve::jit::classify_task(""));
+                crate::evolve::profile::apply_to_config(&profile, &mut runtime.config);
+                Arc::new(runtime)
+            }
+            (None, _) => config,
+        };
         Ok(Arc::new(Harness {
             config,
             store,
@@ -496,6 +570,8 @@ impl Harness {
             state: Mutex::new(HarnessState::default()),
             goal_clock,
             memory_tasks: Mutex::new(vec![]),
+            harness_bundle,
+            harness_bundle_id: bundle_id,
         }))
     }
 
@@ -1138,7 +1214,11 @@ impl Harness {
         }
         self.drain_pending_context();
         self.ensure_repo_index_once().await;
-        self.memory_event(json!({ "type": "task_started", "task": prompt }));
+        self.memory_event(json!({ "type": "task_started", "task": prompt, "taskId": std::env::var("GOON_TASK_ID").ok().filter(|v| !v.is_empty()) }));
+        if let Some(bundle_id) = &self.harness_bundle_id {
+            let components = self.harness_bundle.as_ref().map(|ctx| ctx.skills.len()).unwrap_or(0);
+            self.emit(json!({ "type": "harness", "bundle": bundle_id, "skills": components, "jit": self.harness_bundle.as_ref().map(|ctx| ctx.jit_enabled.unwrap_or(false)).unwrap_or(false) }));
+        }
         let budget_config = ContextBudgetConfig::from_config(&self.config);
         let pre = allocate_context_budget(&budget_config, "");
         let untrusted = *self.untrusted_prompts.lock().unwrap();
@@ -1191,6 +1271,10 @@ impl Harness {
             let goal = self.store.session.lock().unwrap().goal.clone();
             let flags = self.tools.flags();
             let system = system_prompt(&self.config, flags.read_only, flags.plan_mode, goal.as_ref(), Some(&mut prompt_cache))?;
+            let system = match &self.harness_bundle {
+                Some(ctx) => format!("{system}{}", render_bundle(ctx)),
+                None => system,
+            };
             let allocation = allocate_context_budget(&budget_config, &system);
             let memory_context = self.retrieve_memory(&expanded.expanded_prompt, allocation.files).await;
             let old_count = self.store.session.lock().unwrap().compactions;

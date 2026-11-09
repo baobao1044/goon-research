@@ -72,6 +72,20 @@ pub const MAIN_OPTIONS: &[OptSpec] = &[
     s("stub-fixture", None),
     b("envelopes", None),
     b("rebuild-session", None),
+    // Harness evolution (`goon evolve ...`) and bundle/JIT selection for a normal run.
+    s("bundle", None),
+    b("evolve", None),
+    b("jit", None),
+    s("round", None),
+    s("rule", None),
+    b("dry-run", None),
+    s("variant", None),
+    s("split", None),
+    b("model-proposer", None),
+    b("run", None),
+    s("tasks", None),
+    s("max-tasks", None),
+    s("goon-bin", None),
 ];
 
 pub const MCP_ADD_OPTIONS: &[OptSpec] = &[s("url", None), s("bearer-env", None), s("bearer-token-env-var", None), m("env"), b("trust", None), s("timeout-ms", None)];

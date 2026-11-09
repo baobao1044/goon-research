@@ -46,8 +46,7 @@ tools and persistence. No ZCode runtime source is copied or loaded.
   cleanup. It is enabled only for interactive TTYs; --no-tui, TERM=dumb, prompt
   mode and JSON retain plain output. Terminal controls in model/tool data are
   stripped. No native UI dependency is required.
-- AnswerProjection owns display compatibility for leading think blocks. It never
-  mutates SDK response messages or signed provider replay metadata. Extraction
+- AnswerProjection owns display compatibility for leading think blocks. It never  mutates SDK response messages or signed provider replay metadata. Extraction
   is incremental across chunk boundaries, ends once visible answer text starts,
   and can be disabled. Reasoning is opt-in on a separate event/display channel.
   Compaction uses the visible summary and refuses reasoning-only output.
@@ -62,6 +61,24 @@ tools and persistence. No ZCode runtime source is copied or loaded.
   non-empty visible assistant answer. Terminal publication follows session close,
   and capacity is released on cleanup failures as well as successful runs.
   See REFERENCE_REVIEW.md for exact source references and NDJSON migration.
+- HarnessEvolution owns the opt-in `goon evolve` subsystem under src/evolve/. It
+  never runs during a session unless a subcommand is invoked or `--bundle`/`--jit`
+  is passed. Editable components are files under `.goon/harness/` (one component =
+  one file, content-addressed bundle ids, parent links, revertible snapshots).
+  Evidence is derived from session event logs into per-task digests, failure
+  clusters and bounded evidence items; raw logs are never rewritten. Every edit is
+  a typed, bounded patch (append/replace-block/insert-bullet/set-param/skill ops,
+  at most 8 ops, at most 8 KiB growth, at most 50% of a file replaced) and is
+  rejected outside the bundle allowlist; src/verify.rs, src/policy.rs, src/config.rs,
+  eval/, tests/ and sessions/ are read-only to evolution. A round is accepted only
+  when it was measured (train tasks present), did not lower the train pass rate, did
+  not lose a previously solved task, and did not lower the dev split when the dev
+  gate is on; rejected rounds restore the base bundle. Every accepted or rejected
+  round writes a manifest pairing each edit with a prediction, and the next round
+  turns that prediction into confirmed/partial/refuted/regressed. Evaluation runs
+  this same binary as a subprocess (GOON_HARNESS_BUNDLE + GOON_TASK_ID), so the
+  measured harness is the shipped harness; --stub keeps it offline and deterministic.
+  See docs/ARCHITECTURE-HARNESS-EVOLUTION.md.
 
 ## Acceptance
 

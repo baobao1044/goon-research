@@ -3,6 +3,7 @@
 pub mod app;
 pub mod args;
 pub mod commands;
+pub mod evolve_cmd;
 
 use crate::config::{self, Config};
 use crate::eventlog::{find_seq_gap, read_event_log, session_id_from_event_log_path};
@@ -589,7 +590,18 @@ async fn main_inner(argv: Vec<String>) -> Result<()> {
         return Ok(());
     }
     let overrides = config_overrides(&values);
-    let config = config::load_config(&overrides)?;
+    let mut config = config::load_config(&overrides)?;
+    // Harness evolution knobs that do not map 1:1 onto a config key.
+    if let Some(bundle) = values.str("bundle") {
+        config.evolve.bundle = Some(bundle);
+    }
+    if values.flag("evolve") {
+        config.evolve.enabled = true;
+    }
+    if values.flag("jit") {
+        config.evolve.enabled = true;
+        config.evolve.jit = true;
+    }
     let policy = crate::policy::resolve_execution_policy(&config, values.flag("allow-net"), &values.list("allow-net-hosts"));
     let positionals = values.positionals.clone();
     let first = positionals.first().map(String::as_str);
@@ -627,6 +639,9 @@ async fn main_inner(argv: Vec<String>) -> Result<()> {
             stdout_write(&format!("{}\n", lines.join("\n")));
         }
         return Ok(());
+    }
+    if first == Some("evolve") {
+        return evolve_cmd::run(&positionals, &values, &config).await;
     }
     if first == Some("replay") {
         let Some(target) = positionals.get(1) else {

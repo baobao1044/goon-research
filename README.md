@@ -383,6 +383,48 @@ goon --no-subagents -p 'Đọc repo và làm trực tiếp'
   env con hay request tới `ollama` (local, không key). Lỗi embedder degrade về `memory_error`,
   không bao giờ làm hỏng run.
 
+## Harness evolution — `goon evolve` (opt-in, v0.8)
+
+Harness (prompt, skills, tool guidance, middleware, policy) là **file thật** trong
+`.goon/harness/`, nên sửa được, diff được và **revert được** — không phải chỉnh tay trong code.
+Toàn bộ subsystem tắt mặc định; chỉ chạy khi gọi `goon evolve ...` hoặc truyền `--bundle`/`--jit`.
+
+- `goon evolve init` — seed `.goon/harness/` (11 component) + `eval/tasks.json` mẫu.
+- `goon evolve status` — liệt kê component, bundle hiện tại, số vòng, verdict gần nhất.
+- `goon evolve digest` — biến `sessions/*.events.jsonl` thành corpus bằng chứng 3 tầng
+  (per-task → cluster lỗi → evidence item), ghi `analysis/*.md` + `corpus.json`.
+- `goon evolve run [--dry-run] [--rule TEXT] [--model-proposer]` — một vòng tiến hoá:
+  đo train → digest → đề xuất **patch có mục tiêu** (không cho viết lại cả file) → apply vào bản
+  nháp → validate → đo lại train + dev → cổng chấp nhận → ghi manifest/duyệt hoặc revert.
+- `goon evolve log` — manifest từng vòng: dự đoán của vòng trước được chấm
+  `confirmed / partial / refuted / regressed` ở vòng sau.
+- `goon evolve revert <round|bundle-id>` — trả `.goon/harness/` về bundle của vòng đó.
+- `goon evolve jit -p '...' [--run]` — chọn harness phù hợp task từ archive (không cần model call);
+  `--run` chạy luôn.
+- `goon evolve eval --split train|dev|test` — đo bundle hiện tại trên bộ task.
+
+Cổng chấp nhận (fail-closed): không có task nào được đo → **reject**; pass rate giảm → reject;
+mất task đã từng giải → reject; dev giảm → reject (khi bật). Bundle bị từ chối không ghi vào
+workspace. Giới hạn kỹ thuật: ≤ 8 op/patch, ≤ 8 KiB/file, không thay > 50% file, và **cấm** sửa
+`src/verify.rs`, `src/policy.rs`, `src/config.rs`, `eval/`, `tests/`, `sessions/`.
+
+Đo bằng chính binary này: mỗi task chạy như một subprocess `goon -p ...` với
+`GOON_HARNESS_BUNDLE` + `GOON_TASK_ID`, judge theo exit code, `expect` substring và `verify` command
+của task. `--stub` giữ toàn bộ vòng lặp offline/tất định cho test.
+
+```bash
+goon evolve init
+goon evolve run --dry-run          # xem patch dự kiến, không tốn budget
+goon evolve run                    # vòng thật (cần API key/model như phiên thường)
+goon evolve log
+goon --bundle <id> -p 'sửa lỗi này'  # áp bundle cho một phiên
+```
+
+Kiến trúc đầy đủ, mapping với 6 paper (AHE, HarnessX, JIT-Agent, Anatomy, Runtime Substrate,
+AutoSaddler) và các giới hạn đã biết: [docs/ARCHITECTURE-HARNESS-EVOLUTION.md](docs/ARCHITECTURE-HARNESS-EVOLUTION.md).
+Trạng thái lưu tại `{data_dir}/harness/` (`snapshots/`, `manifests/`, `runs/`, `digest/`,
+`evodag.jsonl`, `solved.json`, `jit.jsonl`); đặt `GOON_HARNESS_DIR` để đổi chỗ lưu.
+
 ## Event log, replay & stub provider (v0.5)
 
 - **Bật ghi log**: `--event-log` (hoặc `GOON_EVENT_LOG=1`, hoặc `"eventLog": true` trong

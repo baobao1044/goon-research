@@ -21,6 +21,7 @@ pub mod cost;
 pub mod embedder;
 pub mod errors;
 pub mod eventlog;
+pub mod evolve;
 pub mod files;
 pub mod generate;
 pub mod harness;

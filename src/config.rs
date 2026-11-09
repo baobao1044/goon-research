@@ -91,6 +91,8 @@ pub struct Config {
     pub embedder_provider: String,
     pub embedder_model: Option<String>,
     pub embedder_base_url: Option<String>,
+    /// Harness evolution subsystem (`[evolve]`); disabled unless enabled or a subcommand runs.
+    pub evolve: crate::evolve::types::EvolveConfig,
 }
 
 impl Default for Config {
@@ -369,6 +371,7 @@ const CONFIG_KEYS: &[&str] = &[
     "embedderProvider",
     "embedderModel",
     "embedderBaseUrl",
+    "evolve",
 ];
 
 /// `configSchema.parse(value)`.
@@ -510,7 +513,54 @@ pub fn parse_config(value: &Value) -> Result<Config> {
         embedder_provider,
         embedder_model,
         embedder_base_url,
+        evolve: parse_evolve(map),
     })
+}
+
+/// `[evolve]` block: camelCase keys, unknown or mistyped fields fall back to defaults so a
+/// hand-edited config never bricks the CLI.
+fn parse_evolve(map: &Map<String, Value>) -> crate::evolve::types::EvolveConfig {
+    let defaults = crate::evolve::types::EvolveConfig::default();
+    let Some(Value::Object(raw)) = map.get("evolve") else { return defaults };
+    let mut normalized = Map::new();
+    for (key, value) in raw {
+        let snake = match key.as_str() {
+            "maxTasks" => "max_tasks",
+            "tokenBudget" => "token_budget",
+            "phasedPatches" => "phased_patches",
+            "requireDevGate" => "require_dev_gate",
+            "maxRegress" => "max_regress",
+            "minGainPp" => "min_gain_pp",
+            "evalPath" => "eval",
+            other => other,
+        };
+        normalized.insert(snake.to_string(), value.clone());
+    }
+    serde_json::from_value(Value::Object(normalized)).unwrap_or(defaults)
+}
+
+impl crate::evolve::types::EvolveConfig {
+    /// Serialized back to config.json (`[evolve]` block, camelCase).
+    pub fn to_value(&self) -> Value {
+        let mut m = Map::new();
+        m.insert("enabled".into(), json!(self.enabled));
+        m.insert("rounds".into(), json!(self.rounds));
+        m.insert("k".into(), json!(self.k));
+        m.insert("maxTasks".into(), json!(self.max_tasks));
+        m.insert("tokenBudget".into(), json!(self.token_budget));
+        m.insert("phasedPatches".into(), json!(self.phased_patches));
+        m.insert("requireDevGate".into(), json!(self.require_dev_gate));
+        m.insert("jit".into(), json!(self.jit));
+        m.insert("maxRegress".into(), json!(self.max_regress));
+        m.insert("minGainPp".into(), num(self.min_gain_pp));
+        if let Some(path) = &self.eval {
+            m.insert("eval".into(), json!(path.to_string_lossy()));
+        }
+        if let Some(bundle) = &self.bundle {
+            m.insert("bundle".into(), json!(bundle));
+        }
+        Value::Object(m)
+    }
 }
 
 impl VerifyConfig {
@@ -591,6 +641,7 @@ impl Config {
         if let Some(v) = &self.embedder_base_url {
             m.insert("embedderBaseUrl".into(), json!(v));
         }
+        m.insert("evolve".into(), self.evolve.to_value());
         Value::Object(m)
     }
 
@@ -621,7 +672,7 @@ pub fn credentials_path() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
-    let base = env_nonempty("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| jsutil::home_dir().join(".local").join("share"));
+    let base = env_nonempty("GOON_DATA_DIR").or_else(|| env_nonempty("XDG_DATA_HOME")).map(PathBuf::from).unwrap_or_else(|| jsutil::home_dir().join(".local").join("share"));
     base.join("goon")
 }
 
