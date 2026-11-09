@@ -34,10 +34,37 @@ pub struct HarnessContext {
     pub middleware: Vec<String>,
     pub memory_notes: Vec<String>,
     pub verify_commands: Vec<String>,
+    /// Extra verification attempts (`policy/verify.json` `maxRepairRounds`).
+    pub verify_repair_rounds: Option<u64>,
     pub context_reserve: Option<f64>,
     pub context_conversation: Option<f64>,
     pub context_files: Option<f64>,
     pub jit_enabled: Option<bool>,
+    /// Require an `<attribution>` block before re-editing after a failed verification.
+    pub attribution: Option<bool>,
+    /// Emit `harness_hook` events for every lifecycle point.
+    pub trace_hooks: Option<bool>,
+    /// Outer loop cap from `policy/loop.json` (0 = keep the built-in behaviour).
+    pub loop_max_steps: Option<u64>,
+    /// Extra verification attempts before failing the turn.
+    pub loop_verify_retries: Option<u64>,
+    /// Tools declared by the bundle (`tools/registry.json`); registered at harness start.
+    pub dynamic_tools: Vec<DynamicTool>,
+}
+
+/// A tool the harness gains from the editable bundle rather than from compiled code.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DynamicTool {
+    pub name: String,
+    pub description: String,
+    /// Shell command template; `{arg}` placeholders are replaced from the model's arguments.
+    pub command: String,
+    /// JSON schema for the tool arguments (object with string properties).
+    pub parameters: serde_json::Value,
+    pub read_only: bool,
+    pub network: bool,
+    /// Argument names substituted into `command`; each must exist in `parameters`.
+    pub args: Vec<String>,
 }
 
 const SYSTEM_CODE: &str = "\
@@ -86,6 +113,14 @@ You are goon, a terminal operations harness changing live state.
 - Never run an irreversible command without stating the blast radius.
 - Keep every change reversible and record the rollback command.
 - Quote command output verbatim when reporting a failure.
+";
+
+/// Seed tool registry: no tools by default. Evolution patches add entries here, and each entry
+/// becomes a real tool the model can call (shell command template, gated by policy).
+const SEED_TOOL_REGISTRY: &str = "{
+  \"version\": 1,
+  \"tools\": []
+}
 ";
 
 const TOOL_GUIDANCE: &str = "\
@@ -190,7 +225,9 @@ pub fn seed_files(variant: Variant) -> BTreeMap<String, String> {
     files.insert(MEMORY_PATH.to_string(), MEMORY.to_string());
     files.insert(VERIFY_POLICY_PATH.to_string(), seed_verify_policy(variant));
     files.insert(CONTEXT_POLICY_PATH.to_string(), seed_context_policy(variant));
-    files.insert(JIT_POLICY_PATH.to_string(), "{\n  \"version\": 1,\n  \"enabled\": true\n}\n".to_string());
+    files.insert(JIT_POLICY_PATH.to_string(), "{\n  \"version\": 1,\n  \"enabled\": true,\n  \"attribution\": true,\n  \"trace\": false\n}\n".to_string());
+    files.insert(LOOP_POLICY_PATH.to_string(), "{\n  \"version\": 1,\n  \"maxSteps\": 0,\n  \"verifyRetries\": 0\n}\n".to_string());
+    files.insert(TOOL_REGISTRY_PATH.to_string(), SEED_TOOL_REGISTRY.to_string());
     for (path, body) in seed_skills(variant) {
         files.insert(path.to_string(), body.to_string());
     }
@@ -321,6 +358,7 @@ pub fn context(files: &BTreeMap<String, String>) -> HarnessContext {
         if let Some(commands) = string_list(source) {
             ctx.verify_commands = commands;
         }
+        ctx.verify_repair_rounds = lookup(&policy, &["maxRepairRounds", "max_repair_rounds", "repairRounds"]).and_then(Value::as_u64);
     }
     if let Some(policy) = parse_json(files.get(CONTEXT_POLICY_PATH)) {
         ctx.context_reserve = fraction(&policy, &["reserve", "contextReserveRatio", "reserveRatio", "context_reserve_ratio"]);
@@ -332,8 +370,45 @@ pub fn context(files: &BTreeMap<String, String>) -> HarnessContext {
             Value::Bool(enabled) => Some(enabled),
             _ => boolean(&policy, &["enabled", "jit"]),
         };
+        ctx.attribution = boolean(&policy, &["attribution", "attributionGate", "requireAttribution"]);
+        ctx.trace_hooks = boolean(&policy, &["trace", "traceHooks", "hooks"]);
+    }
+    if let Some(policy) = parse_json(files.get(LOOP_POLICY_PATH)) {
+        ctx.loop_max_steps = lookup(&policy, &["maxSteps", "max_steps", "steps"]).and_then(Value::as_u64);
+        ctx.loop_verify_retries = lookup(&policy, &["verifyRetries", "verify_retries", "retries"]).and_then(Value::as_u64);
+    }
+    if let Some(registry) = parse_json(files.get(TOOL_REGISTRY_PATH)) {
+        ctx.dynamic_tools = dynamic_tools(&registry);
     }
     ctx
+}
+
+/// Parses `tools/registry.json`: `{"tools":[{"name","description","command","parameters",...}]}`.
+/// Invalid entries are ignored: a broken tool must never stop a session from starting.
+fn dynamic_tools(registry: &Value) -> Vec<DynamicTool> {
+    let list = match lookup(registry, &["tools", "registry"]) {
+        Some(Value::Array(items)) => items.clone(),
+        _ => return Vec::new(),
+    };
+    let mut tools: Vec<DynamicTool> = Vec::new();
+    for item in list {
+        let Some(name) = item.get("name").and_then(Value::as_str).map(str::trim).filter(|name| !name.is_empty()) else { continue };
+        let Some(command) = item.get("command").and_then(Value::as_str).map(str::trim).filter(|command| !command.is_empty()) else { continue };
+        if tools.iter().any(|tool| tool.name == name) {
+            continue;
+        }
+        let args: Vec<String> = item.get("args").and_then(Value::as_array).map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+        tools.push(DynamicTool {
+            name: name.to_string(),
+            description: item.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
+            command: command.to_string(),
+            parameters: item.get("parameters").cloned().unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}})),
+            read_only: item.get("readOnly").and_then(Value::as_bool).or_else(|| item.get("read_only").and_then(Value::as_bool)).unwrap_or(false),
+            network: item.get("network").and_then(Value::as_bool).unwrap_or(false),
+            args,
+        });
+    }
+    tools
 }
 
 /// Restores a snapshot's files into the workspace bundle directory.

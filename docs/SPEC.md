@@ -79,6 +79,19 @@ tools and persistence. No ZCode runtime source is copied or loaded.
   this same binary as a subprocess (GOON_HARNESS_BUNDLE + GOON_TASK_ID), so the
   measured harness is the shipped harness; --stub keeps it offline and deterministic.
   See docs/ARCHITECTURE-HARNESS-EVOLUTION.md.
+- HarnessPipeline owns the opt-in middleware layer. It is built only when evolution is enabled
+  (`--evolve`, `--bundle`, or `evolve.enabled`); otherwise a disabled pipeline short-circuits every
+  dispatch and a session behaves exactly as before. Eight hooks (task/step start, before/after
+  model, before/after tool, step end, task end) run ordered processors with an optional singleton
+  group, so replacing one processor never disturbs its neighbours. Built-ins: AttributionGate
+  refuses a mutating tool after a failed verification until the assistant text carries an
+  `<attribution>` block (attribution before recovery); JitRepairDirective converts an unstable
+  signal into a bounded repair (at most two per run, profile-only, no chat message injected);
+  HookTracer records hook events when the bundle asks for tracing. A bundle tool declared in
+  `tools/registry.json` becomes a real registered tool whose command runs in the workspace with
+  arguments restricted to a safe character set; approval, read-only and network policy still apply.
+  `policy/loop.json maxSteps` bounds the outer loop and `policy/verify.json maxRepairRounds` bounds
+  verification retries. A declared verify command enables the verify stage rather than being inert.
 
 ## Acceptance
 

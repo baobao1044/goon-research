@@ -99,24 +99,20 @@ impl HarnessStore {
         Ok(ids)
     }
 
-    /// Newest snapshot by `created`, tie-broken by round then id; unreadable snapshots are skipped.
+    /// Newest snapshot: the last distinct id appended to `bundles.jsonl` (append order is the
+    /// authoritative recency signal; `created` only has second resolution). Unreadable snapshots
+    /// are skipped, falling back to the newest snapshot directory.
     pub fn latest_bundle(&self) -> Result<Option<HarnessBundle>> {
-        let mut entries: Vec<(String, u32, String)> = Vec::new();
-        for value in self.read_jsonl(&self.bundles_index())? {
+        let entries = self.read_jsonl(&self.bundles_index())?;
+        let mut ordered: Vec<String> = Vec::new();
+        for value in entries {
             let Some(id) = value.get("id").and_then(serde_json::Value::as_str) else { continue };
             if id.is_empty() {
                 continue;
             }
-            let created = value.get("created").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
-            let round = value.get("round").and_then(serde_json::Value::as_u64).unwrap_or(0).min(u32::MAX as u64) as u32;
-            entries.push((created, round, id.to_string()));
+            ordered.push(id.to_string());
         }
-        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)).then_with(|| b.2.cmp(&a.2)));
-        let mut seen = BTreeSet::new();
-        for (_, _, id) in entries {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
+        for id in ordered.into_iter().rev() {
             if let Ok(bundle) = self.load_bundle(&id) {
                 return Ok(Some(bundle));
             }

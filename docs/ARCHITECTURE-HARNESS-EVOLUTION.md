@@ -80,10 +80,59 @@ revertible and diffable without a VCS dependency.
 | `subagents/*.md` | role prompts | subagent role text |
 | `memory.md` | durable lessons | `<harness:memory>` bullets |
 | `policy/context.json` | context ratios | `Config` overrides (clamped) |
-| `policy/verify.json` | verify commands | `verify.commands` |
-| `policy/jit.json` | JIT selection | `evolve.jit` |
+| `policy/verify.json` | verify commands + `maxRepairRounds` | `verify.commands`, `verify.max_repair_rounds` |
+| `policy/loop.json` | `maxSteps`, `verifyRetries` | outer-loop bound |
+| `policy/jit.json` | JIT + attribution + trace switches | pipeline construction |
+| `tools/registry.json` | tool declarations (name, command template, schema, args) | real tools registered at harness start |
 
-## 5. Edit language (targeted modification, paper 6)
+`tools/registry.json` is what makes `new_tool` a genuine capability edit rather than a label: an
+entry becomes a callable tool whose command runs in the workspace. Substituted arguments are
+restricted to `[A-Za-z0-9._\-/=:,@+]` and refused otherwise, so a tool declaration can never turn
+into shell injection; approval, read-only and network policy still apply.
+
+## 5. Middleware pipeline (paper 2)
+
+Eight lifecycle hooks, ordered processors, five outcomes. The pipeline is only built when
+evolution is enabled (`--evolve`, `--bundle`, or `evolve.enabled`), so a default session keeps its
+exact previous behaviour (`Pipeline::disabled()` short-circuits every dispatch).
+
+| Hook | Where it fires |
+|---|---|
+| `TaskStart` | first thing in a run, after the session records `task_started` |
+| `StepStart` | top of each outer loop iteration (also enforces `loop.json maxSteps`) |
+| `BeforeModel` | after context budgeting, immediately before the request |
+| `AfterModel` | once a streamed step completed (carries tool-call and token counts) |
+| `BeforeTool` | per tool call, before execution (attribution gate lives here) |
+| `AfterTool` | per tool call, after its result is recorded |
+| `StepEnd` | after verification, before the next iteration (JIT repair lives here) |
+| `TaskEnd` | before the run returns (answered or stopped) |
+
+Processors declare `Order` (PRE/NORMAL/POST) and an optional singleton `group`; registering two
+processors in one group on one hook is rejected, and `replace()` swaps a group without touching
+its neighbours. Outcomes: `Pass`, `Transform(events)`, `Intercept(events)`, and
+`Interrupt { reason, events }` — the last one emits its events and forbids the action.
+
+Built-ins:
+
+- **AttributionGate** (`BeforeTool`, group `safety`) — after a failed verification, a mutating
+  tool is refused until the assistant text contains
+  `<attribution>observed…expected…diagnosis…</attribution>`. This is the runtime-substrate rule
+  "attribute before recovering"; without it the model re-edits blindly.
+- **JitRepairDirective** (`StepEnd`, group `jit`) — turns an unstable signal
+  (`verify_fail`, `tool_error`, `context_overflow`, `parse_error`) into a repair event.
+- **HookTracer** (all eight hooks, POST) — emits `harness_hook` events when `policy/jit.json`
+  sets `"trace": true`.
+
+## 6. JIT selection and repair (paper 3)
+
+`--jit` / `evolve.jit` builds a `JitPlanner`. On a round it plans a profile from the bundle plus
+the `jit.jsonl` archive (pass rate, then fewer tokens), and after an unstable step it repairs the
+profile at most `MAX_JIT_REPAIRS = 2` times: overflowing context shrinks the conversation share,
+a verify failure stages verify commands, a tool error adds recovery guidance. Repairs adjust the
+profile and emit `jit_repaired`; they deliberately do **not** inject chat messages, because that
+would displace the verification instruction the next step must act on.
+
+## 7. Edit language (targeted modification, paper 6)
 
 The evolution agent can only emit these operations; there is no "write this file" primitive:
 
@@ -99,7 +148,7 @@ Hard limits enforced in `patch.rs`: `MAX_OPS = 8`, `MAX_GROWTH_BYTES = 8192`,
 `--yolo`, auto-approval and subagents cannot widen this. The verifier is the reward signal, so
 it stays read-only to the thing being optimized.
 
-## 6. Where the measurements come from (and their limits)
+## 8. Where the measurements come from (and their limits)
 
 - Train split drives diagnosis and the round decision; dev split gates durability; test split is
   read at most once (AutoSaddler discipline).
@@ -112,7 +161,7 @@ Honest limits compared with the papers: eval sets here are small (default
 `max_tasks = 10`), rounds are manual, and there is no RL/training bridge. Expect a handful of
 tasks and one round per invocation, not 89 tasks × 10 rounds versus Terminal-Bench.
 
-## 7. Commands
+## 9. Commands
 
 ```bash
 goon evolve init                     # seed .goon/harness + eval/tasks.json
@@ -133,7 +182,7 @@ goon --jit -p '...'                  # enable JIT selection for this run
 State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manifests/<round>.json`,
 `runs/<id>.json`, `digest/`, `evodag.jsonl`, `solved.json`, `jit.jsonl`.
 
-## 8. Failure modes handled explicitly
+## 10. Failure modes handled explicitly
 
 | Failure | Handling |
 |---|---|
@@ -146,8 +195,54 @@ State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manif
 | Trace log corrupt/torn | skipped and counted; torn tail still read |
 | Prediction was wrong | next round records Refuted/Regressed on the manifest |
 | User distrusts a bundle | `goon evolve revert <round>` restores the base snapshot |
+| Model re-edits blindly after a failed verify | attribution gate refuses the mutation |
+| Run loops forever making tool calls | `policy/loop.json maxSteps` stops it |
+| Bundle declares a tool with hostile arguments | argument charset allowlist refuses it |
 
-## 9. Test coverage
+## 11. The 29 design patterns (paper 4) and where this repo stands
 
-`cargo test --lib evolve` — 69 tests over `bundle`, `store`, `digest`, `patch`, `manifest`,
-`profile`, `jit`, `eval`, `types`, plus CLI-level coverage in `tests/evolve.test.mjs`.
+`✅` implemented · `🟡` partial · `❌` not implemented · `—` out of scope
+
+| # | Pattern | This repo |
+|---|---|---|
+| 1 | Event Sourcing | ✅ `eventlog.rs`, pipeline hook events |
+| 2 | Policy-as-Code | 🟡 `policy.rs` + bundle `policy/*.json` |
+| 3 | Recursive Composition | ✅ `subagents.rs` |
+| 4 | Polymorphic Edits | 🟡 `tools.rs` input aliases |
+| 5 | Deferred Loading | ❌ no `tool_search` |
+| 6 | Template Method | ❌ |
+| 7 | Protocol Interfaces | ✅ `LanguageModel`, `ToolExec`, `Approve`, `MemoryHooks` |
+| 8 | LLM Summarization | ✅ `context.rs` compaction |
+| 9 | Stuck Detection | 🟡 repeat counter + loop warning |
+| 10 | Reflection Loop | 🟡 `coord.rs` reflect/rerank |
+| 11 | Prompt Caching | ❌ no cache boundary control |
+| 12 | Context Forking | 🟡 subagent context isolation |
+| 13 | Middleware Pipeline | ✅ `evolve/pipeline.rs` eight hooks |
+| 14 | JIT Repo Context | ✅ AGENTS.md chain, `@file` |
+| 15 | Skills | ✅ `skills/*.md` + `$skill` |
+| 16 | Conditional Activation | 🟡 skill scopes; no `paths:` trigger |
+| 17 | Turn-Level Checkpoint | ✅ `session.rs` + file backups |
+| 18 | Agent-Maintained Memory | 🟡 `memory.rs` lessons |
+| 19 | Outer Verification Loop | ✅ `verify.rs` + `ErrNotVerified` |
+| 20 | Self-Improving Skill Loop | 🟡 bundle patches can add skills; no curation |
+| 21 | Lineage Compaction | ❌ |
+| 22 | Session-Tree Version Control | ❌ |
+| 23 | Minimal-Core / Extension-Host | 🟡 pipeline + bundle are the extension seam |
+| 24 | Client/Server Harness | ❌ |
+| 25 | Model-Family Prompt Matrix | 🟡 `provider.rs` capability table |
+| 26 | Cache-Dialect Fanout | ❌ |
+| 27 | Syntax-Aware Command Permissioning | 🟡 `risk.rs` shell scanning |
+| 28 | Untrusted-Content Delimiting | ✅ `<untrusted_context>`, `redact.rs` |
+| 29 | Harness Mimicry | — not adopted (ToS) |
+
+Count: ✅ 10 · 🟡 12 · ❌ 6 · — 1. The gaps are deliberate: this is a single static binary aimed
+at Termux, and every pattern skipped here (session trees, client/server split, cache fanout,
+neural code RAG) is a large subsystem whose cost would land on every user.
+
+## 12. Test coverage
+
+`cargo test --lib evolve` — 77 tests over `bundle`, `store`, `digest`, `patch`, `manifest`,
+`profile`, `jit`, `eval`, `pipeline`, `types`, plus CLI-level coverage in `tests/evolve.test.mjs`
+(11 tests: seeding, status, digest, unmeasured-round rejection, JIT planning, revert, bundle
+application with a `harness` event, snapshot identity, a bundle-declared tool that really runs,
+`maxSteps` enforcement, and the attribution gate).

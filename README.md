@@ -403,6 +403,20 @@ Toàn bộ subsystem tắt mặc định; chỉ chạy khi gọi `goon evolve ..
   `--run` chạy luôn.
 - `goon evolve eval --split train|dev|test` — đo bundle hiện tại trên bộ task.
 
+Khi một bundle đang được áp, harness có thêm 4 lớp điều khiển bằng file:
+
+- **Middleware pipeline 8 hook** (`task_start`, `step_start`, `before_model`, `after_model`,
+  `before_tool`, `after_tool`, `step_end`, `task_end`) với processor có thứ tự PRE/NORMAL/POST và
+  singleton group; mặc định rỗng nên phiên thường không đổi hành vi.
+- **Attribution gate**: sau khi verify fail, mọi tool ghi/sửa bị từ chối cho tới khi câu trả lời có
+  `<attribution>observed…expected…diagnosis…</attribution>` — buộc chẩn đoán trước khi sửa lại.
+- **JIT repair**: `--jit` cho phép chọn profile theo task và tự sửa profile (tối đa 2 lần) khi gặp
+  `verify_fail` / `tool_error` / `context_overflow`; repair đổi profile, không chèn chat message.
+- **Tool do bundle khai báo** (`tools/registry.json`): thêm tool thật (template lệnh shell, schema
+  tham số); tham số bị giới hạn bộ ký tự an toàn nên không thành injection, vẫn qua approval/policy.
+- **Loop policy** (`policy/loop.json`) và `maxRepairRounds` trong `policy/verify.json` chặn vòng lặp
+  vô hạn và đặt số lần sửa verify.
+
 Cổng chấp nhận (fail-closed): không có task nào được đo → **reject**; pass rate giảm → reject;
 mất task đã từng giải → reject; dev giảm → reject (khi bật). Bundle bị từ chối không ghi vào
 workspace. Giới hạn kỹ thuật: ≤ 8 op/patch, ≤ 8 KiB/file, không thay > 50% file, và **cấm** sửa

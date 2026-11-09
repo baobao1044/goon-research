@@ -97,6 +97,94 @@ pub fn noop_emit() -> Emit {
     Arc::new(|_| {})
 }
 
+/// Builds the middleware pipeline and JIT planner for this process.
+///
+/// Both stay inert by default: `Pipeline::disabled()` short-circuits every dispatch, and no
+/// planner is created, so an ordinary session keeps its exact previous behaviour.
+fn build_evolve_layers(config: &RuntimeConfig, bundle: Option<&crate::evolve::bundle::HarnessContext>) -> (crate::evolve::pipeline::Pipeline, Option<crate::evolve::jit::JitPlanner>) {
+    let enabled = config.evolve.enabled || bundle.is_some();
+    if !enabled {
+        return (crate::evolve::pipeline::Pipeline::disabled(), None);
+    }
+    let attribution = bundle.and_then(|ctx| ctx.attribution).unwrap_or(true);
+    let jit_flag = bundle.and_then(|ctx| ctx.jit_enabled).unwrap_or(config.evolve.jit) && config.evolve.jit;
+    let trace = bundle.and_then(|ctx| ctx.trace_hooks).unwrap_or(false);
+    let pipeline = crate::evolve::pipeline::default_pipeline(attribution, jit_flag, trace).unwrap_or_else(|_| crate::evolve::pipeline::Pipeline::disabled());
+    let planner = jit_flag.then(|| {
+        let store = crate::evolve::store::HarnessStore::new(crate::evolve::state_root(&config.data_dir));
+        crate::evolve::jit::JitPlanner::new(store)
+    });
+    (pipeline, planner)
+}
+
+/// Registers tools declared by `tools/registry.json`, so an evolution patch can add a real
+/// tool (shell command template) instead of only prose. Each tool keeps the normal approval,
+/// read-only and network gates.
+fn register_dynamic_tools(tools: &Arc<ToolRegistry>, ctx: &crate::evolve::bundle::HarnessContext) {
+    for tool in &ctx.dynamic_tools {
+        let name = tool.name.clone();
+        let template = tool.command.clone();
+        let args = tool.args.clone();
+        let cwd = tools.files.root.clone();
+        let exec: crate::tools::ToolExec = Arc::new(move |input: Value, cancel: CancellationToken| {
+            let template = template.clone();
+            let args = args.clone();
+            let cwd = cwd.clone();
+            Box::pin(async move {
+                let mut command = template;
+                for arg in &args {
+                    let value = input.get(arg).and_then(Value::as_str).unwrap_or("");
+                    // Values are substituted unquoted, so only a strict character set is allowed.
+                    // This is the portable-safe choice: shell quoting differs per platform and
+                    // silently either breaks the command or reintroduces injection.
+                    let safe = safe_tool_arg(value)?;
+                    command = command.replace(&format!("{{{arg}}}"), &safe);
+                }
+                let options = crate::process::RunOptions { cwd: &cwd, cancel: &cancel, timeout_ms: 120_000, env: None, output_limit_bytes: Some(200_000), hard_output_bytes: Some(400_000) };
+                match crate::process::run_command(shell_program(), &shell_args(&command), options).await {
+                    Ok(result) => Ok(result.output),
+                    Err(error) => Err(crate::process::command_error_to_anyhow(error)),
+                }
+            })
+        });
+        let _ = tools.register_json(&name, &tool.description, &tool.parameters, tool.read_only, None, Some(tool.network), Some(true), exec);
+    }
+}
+
+fn shell_program() -> &'static str {
+    if cfg!(windows) {
+        "cmd"
+    } else {
+        "sh"
+    }
+}
+
+/// Rejects any argument that could carry shell syntax into a bundle tool command.
+///
+/// Allowed: alphanumerics and `. _ - / = : , @ +` (paths, ids, flags). Everything else — quotes,
+/// spaces, `$`, `;`, `|`, `&`, backticks, redirections — is refused instead of escaped.
+fn safe_tool_arg(value: &str) -> Result<String> {
+    if value.chars().count() > 512 {
+        bail!("tool argument too long ({} chars)", value.chars().count());
+    }
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let ok = value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | '=' | ':' | ',' | '@' | '+'));
+    if !ok {
+        bail!("tool argument contains characters that are not allowed: {value:?}");
+    }
+    Ok(value.to_string())
+}
+
+fn shell_args<T: AsRef<str>>(command: &T) -> Vec<String> {
+    if cfg!(windows) {
+        vec!["/C".to_string(), command.as_ref().to_string()]
+    } else {
+        vec!["-c".to_string(), command.as_ref().to_string()]
+    }
+}
+
 /// The user cancelled (Ctrl-C / signal).
 #[derive(Debug, Clone)]
 pub struct Aborted(pub String);
@@ -402,6 +490,14 @@ struct HarnessState {
     last_verify_verdict: Option<VerifyVerdict>,
     verify_rolled_back: bool,
     repo_indexed_once: bool,
+    /// Steps executed in this run (bounded by the bundle's `policy/loop.json`).
+    step_count: u64,
+    /// Repaired profile knobs applied by the JIT layer for the rest of the run.
+    jit_repairs: u32,
+    /// Set when the last completed verification failed (attribution gate input).
+    verify_failed: bool,
+    /// Most recent failure class seen by the pipeline (`verify_fail`, `tool_error`, ...).
+    last_signal: Option<String>,
 }
 
 #[derive(Default)]
@@ -430,6 +526,10 @@ pub struct Harness {
     pub harness_bundle: Option<Arc<crate::evolve::bundle::HarnessContext>>,
     /// Id of the applied bundle (`None` when the built-in harness runs unchanged).
     pub harness_bundle_id: Option<String>,
+    /// Ordered middleware pipeline; empty unless evolution/JIT is enabled.
+    pipeline: crate::evolve::pipeline::Pipeline,
+    /// JIT planner used for task-adaptive selection and bounded repair.
+    jit: Option<crate::evolve::jit::JitPlanner>,
 }
 
 /// Mirrors goal time/token usage for the active turn; `allow_stopped` also flushes paused goals.
@@ -558,6 +658,11 @@ impl Harness {
             }
             (None, _) => config,
         };
+        // Composability layer: built from the bundle when evolution is in play, empty otherwise.
+        let (pipeline, jit) = build_evolve_layers(&config, harness_bundle.as_deref());
+        if let Some(ctx) = harness_bundle.as_deref() {
+            register_dynamic_tools(&tools, ctx);
+        }
         Ok(Arc::new(Harness {
             config,
             store,
@@ -572,6 +677,8 @@ impl Harness {
             memory_tasks: Mutex::new(vec![]),
             harness_bundle,
             harness_bundle_id: bundle_id,
+            pipeline,
+            jit,
         }))
     }
 
@@ -585,6 +692,72 @@ impl Harness {
 
     fn emit(&self, event: Value) {
         (self.emit)(event);
+    }
+
+    /// Runs one pipeline hook, emitting the events its processors produced.
+    ///
+    /// Returns `Some(reason)` when a processor interrupted the chain: the caller must not
+    /// perform the action. Disabled pipelines return `None` and emit nothing.
+    fn dispatch_hook(&self, hook: crate::evolve::pipeline::Hook, event: Value, tool: Option<&str>, tool_is_mutation: bool) -> Option<String> {
+        if !self.pipeline.is_enabled() {
+            return None;
+        }
+        let (verify_failed, verify_retries, last_signal, step, jit_enabled) = {
+            let st = self.state.lock().unwrap();
+            (st.verify_failed, st.verify_attempts, st.last_signal.clone(), st.step_count, self.jit.is_some())
+        };
+        let attribution_present = {
+            let session = self.store.session.lock().unwrap();
+            session
+                .messages
+                .iter()
+                .rev()
+                .take(4)
+                .filter_map(|message| {
+                    let parts = crate::model::content_parts(message);
+                    let text: String = parts.iter().filter(|part| crate::model::part_type(part) == "text").filter_map(|part| part.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
+                    (!text.is_empty()).then_some(text)
+                })
+                .next()
+                .map(|text| crate::evolve::pipeline::has_attribution(&text))
+                .unwrap_or(false)
+        };
+        let context = crate::evolve::pipeline::PipelineContext {
+            task: String::new(),
+            tool: tool.map(str::to_string),
+            tool_is_mutation,
+            verify_failed,
+            verify_retries,
+            attribution_present,
+            jit_enabled,
+            last_signal,
+            step,
+        };
+        let dispatch = self.pipeline.dispatch(hook, event, &context);
+        for produced in dispatch.events {
+            self.emit(produced);
+        }
+        dispatch.interrupt
+    }
+
+    /// Applies a JIT repair after an unstable step, at most `MAX_JIT_REPAIRS` times per run.
+    async fn repair_jit(&self, signal: &str) {
+        let Some(planner) = &self.jit else { return };
+        let repairs = self.state.lock().unwrap().jit_repairs;
+        if repairs >= crate::evolve::jit::MAX_JIT_REPAIRS {
+            return;
+        }
+        let decision = match planner.plan("", None) {
+            Ok(decision) => decision,
+            Err(_) => return,
+        };
+        let failure = crate::evolve::types::FailureSignal::classify(signal);
+        if let Ok(Some(repaired)) = planner.repair(&decision, &failure) {
+            self.state.lock().unwrap().jit_repairs += 1;
+            // A repair adjusts the profile, it does not talk to the model: injecting a chat
+            // message here would displace the verify instruction the next step must act on.
+            self.emit(json!({ "type": "jit_repaired", "rationale": repaired.rationale, "repairs": repaired.repairs }));
+        }
     }
 
     /// Accounts one provider request against the shared ledger and this session.
@@ -1219,6 +1392,7 @@ impl Harness {
             let components = self.harness_bundle.as_ref().map(|ctx| ctx.skills.len()).unwrap_or(0);
             self.emit(json!({ "type": "harness", "bundle": bundle_id, "skills": components, "jit": self.harness_bundle.as_ref().map(|ctx| ctx.jit_enabled.unwrap_or(false)).unwrap_or(false) }));
         }
+        self.dispatch_hook(crate::evolve::pipeline::Hook::TaskStart, json!({ "type": "task_start" }), None, false);
         let budget_config = ContextBudgetConfig::from_config(&self.config);
         let pre = allocate_context_budget(&budget_config, "");
         let untrusted = *self.untrusted_prompts.lock().unwrap();
@@ -1262,6 +1436,13 @@ impl Harness {
             if cancel.is_cancelled() {
                 return Err(Aborted::default().into());
             }
+            // Outer-loop bound from the editable `policy/loop.json` (0 keeps the built-in behaviour).
+            let max_steps = self.harness_bundle.as_ref().and_then(|ctx| ctx.loop_max_steps).unwrap_or(0);
+            let steps = self.state.lock().unwrap().step_count;
+            if max_steps > 0 && steps >= max_steps {
+                bail!("Harness step limit reached ({max_steps}). Raise policy/loop.json maxSteps or start a new turn.");
+            }
+            self.dispatch_hook(crate::evolve::pipeline::Hook::StepStart, json!({ "type": "step_start", "step": steps }), None, false);
             if self.drain_pending_context() {
                 self.store.save()?;
             }
@@ -1303,6 +1484,7 @@ impl Harness {
                 event.insert("reason".into(), json!(r));
             }
             self.emit(Value::Object(event));
+            self.dispatch_hook(crate::evolve::pipeline::Hook::BeforeModel, json!({ "type": "before_model", "step": steps }), None, false);
             let defs = self.tools.exposed_definitions();
             let tool_specs = self.tools.schemas();
             let mut attempt: u32 = 0;
@@ -1351,6 +1533,8 @@ impl Harness {
                         self.store.session.lock().unwrap().messages.extend(step.assistant_messages.clone());
                         text.push_str(&step.text);
                         self.store.save()?;
+                        self.state.lock().unwrap().step_count += 1;
+                        self.dispatch_hook(crate::evolve::pipeline::Hook::AfterModel, json!({ "type": "after_model", "calls": step.calls.len(), "tokens": tokens }), None, false);
                         break step;
                     }
                     Err(error) => {
@@ -1379,6 +1563,7 @@ impl Harness {
                     bail!("Model finished without a visible answer.");
                 }
                 self.remember_assistant_message(text);
+                self.dispatch_hook(crate::evolve::pipeline::Hook::TaskEnd, json!({ "type": "task_end", "status": "answered" }), None, false);
                 return Ok(text.clone());
             }
             let batch_deadline = self.remaining_budget_time(budget).map(|rem| Deadline::new(cancel, rem));
@@ -1401,6 +1586,7 @@ impl Harness {
                 self.emit(json!({ "type": "stopped", "reason": reason }));
                 self.enforce_final_verification()?;
                 self.remember_assistant_message(text);
+                self.dispatch_hook(crate::evolve::pipeline::Hook::TaskEnd, json!({ "type": "task_end", "status": "stopped" }), None, false);
                 return Ok(text.clone());
             }
             self.flush_goal(false);
@@ -1420,6 +1606,14 @@ impl Harness {
                 bail!("{}", Self::budget_time_exceeded_reason(budget));
             }
             verified?;
+            let step_signal = {
+                let st = self.state.lock().unwrap();
+                st.last_signal.clone()
+            };
+            self.dispatch_hook(crate::evolve::pipeline::Hook::StepEnd, json!({ "type": "step_end" }), None, false);
+            if let Some(signal) = step_signal {
+                self.repair_jit(&signal).await;
+            }
             let limit_goal = {
                 let s = self.store.session.lock().unwrap();
                 s.goal.clone().filter(|g| g.status == "budget_limited")
@@ -1515,6 +1709,9 @@ impl Harness {
                 let mut st = self.state.lock().unwrap();
                 st.verify_attempts += 1;
                 st.last_verify_verdict = Some(verdict.clone());
+                // Pipeline inputs: a failed verify arms the attribution gate and JIT repair.
+                st.verify_failed = true;
+                st.last_signal = Some("verify_fail".to_string());
                 st.verify_attempts
             };
             let max_rounds = verify_config.max_repair_rounds.max(1);
@@ -1531,6 +1728,8 @@ impl Harness {
             let mut st = self.state.lock().unwrap();
             st.verify_attempts = 0;
             st.last_verify_verdict = None;
+            st.verify_failed = false;
+            st.last_signal = None;
         }
         if !verdict.warnings.is_empty() {
             let warning_text = redact_text(&format_verify_warnings(&verdict), &[&self.config.api_key]);
@@ -1573,6 +1772,17 @@ impl Harness {
                 bail!("{}", if already_denied { "Skipped after permission denial." } else { "Cancelled before dispatch." });
             }
             let sig = call_signature(&call);
+            // Attribution gate: after a failed verification, a mutating tool needs a diagnosis
+            // block first. Interception is a refusal, not an approval prompt.
+            let is_mutation = matches!(meta["kind"].as_str(), Some("edit") | Some("exec"));
+            if let Some(reason) = self.dispatch_hook(crate::evolve::pipeline::Hook::BeforeTool, json!({ "type": "before_tool", "tool": call.tool_name }), Some(&call.tool_name), is_mutation) {
+                let mut d = denied_flag.lock().unwrap();
+                d.0 = true;
+                drop(d);
+                self.emit(json!({ "type": "tool", "name": call.tool_name, "id": call.tool_call_id, "state": "error", "meta": meta.clone() }));
+                let output = json!({ "type": "error-text", "value": reason });
+                return Ok(json!({ "type": "tool-result", "toolCallId": call.tool_call_id, "toolName": call.tool_name, "output": output }));
+            }
             let repeat = {
                 let mut st = self.state.lock().unwrap();
                 if sig == st.last_call_sig {
@@ -1637,6 +1847,19 @@ impl Harness {
             };
             let output = json!({ "type": if result.denied { "error-text" } else { "text" }, "value": format!("{}{loop_note}", result.text) });
             self.emit(json!({ "type": "tool", "name": call.tool_name, "id": call.tool_call_id, "state": if result.denied { "error" } else { "done" }, "meta": meta.clone() }));
+            {
+                let mut st = self.state.lock().unwrap();
+                // Failure classes feed the JIT repair decision at the end of the step.
+                static EXIT: OnceLock<Regex> = OnceLock::new();
+                let exit_re = EXIT.get_or_init(|| Regex::new(r"(?m)^Exit code:\s*(\d+)").unwrap());
+                let nonzero_exit = meta["kind"] == "exec" && exit_re.captures(&result.text).map(|c| &c[1] != "0").unwrap_or(false);
+                if result.denied {
+                    st.last_signal = Some("approval_denied".to_string());
+                } else if nonzero_exit || result.text.contains("Error:") {
+                    st.last_signal = Some("tool_error".to_string());
+                }
+            }
+            self.dispatch_hook(crate::evolve::pipeline::Hook::AfterTool, json!({ "type": "after_tool", "tool": call.tool_name, "denied": result.denied }), Some(&call.tool_name), false);
             Ok(output)
         }
         .await;

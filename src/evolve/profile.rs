@@ -82,6 +82,8 @@ pub struct HarnessProfile {
     pub context_files: Option<f64>,
     #[serde(default)]
     pub verify_commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_repair_rounds: Option<u64>,
     #[serde(default)]
     pub memory_notes: Vec<String>,
     #[serde(default)]
@@ -99,6 +101,7 @@ impl Default for HarnessProfile {
             context_conversation: None,
             context_files: None,
             verify_commands: vec![],
+            verify_repair_rounds: None,
             memory_notes: vec![],
             jit: false,
         }
@@ -142,6 +145,7 @@ pub fn from_context(ctx: &HarnessContext, variant: Variant) -> HarnessProfile {
     profile.context_conversation = ctx.context_conversation.filter(|value| value.is_finite());
     profile.context_files = ctx.context_files.filter(|value| value.is_finite());
     profile.verify_commands = clean_commands(&ctx.verify_commands);
+    profile.verify_repair_rounds = ctx.verify_repair_rounds;
     profile.memory_notes = clean_notes(&ctx.memory_notes);
     profile.jit = ctx.jit_enabled.unwrap_or(false);
     profile
@@ -159,6 +163,8 @@ pub fn from_files(files: &BTreeMap<String, String>, variant: Variant) -> Result<
     }
     if let Some(body) = files.get(VERIFY_POLICY_PATH) {
         profile.verify_commands = parse_verify_commands(body, VERIFY_POLICY_PATH)?;
+        profile.verify_repair_rounds =
+            serde_json::from_str::<serde_json::Value>(body).ok().and_then(|value| value.get("maxRepairRounds").or_else(|| value.get("max_repair_rounds")).and_then(serde_json::Value::as_u64));
     }
     if let Some(body) = files.get(JIT_POLICY_PATH) {
         profile.jit = parse_jit_enabled(body, JIT_POLICY_PATH)?;
@@ -186,7 +192,13 @@ pub fn apply_to_config(profile: &HarnessProfile, config: &mut crate::config::Con
     }
     let commands = clean_commands(&profile.verify_commands);
     if !commands.is_empty() {
+        // A bundle that declares verify commands means "verify this", so it also enables the
+        // stage: otherwise the declaration would be silently inert.
+        config.verify.enabled = true;
         config.verify.commands = commands;
+    }
+    if let Some(rounds) = profile.verify_repair_rounds.filter(|rounds| *rounds > 0) {
+        config.verify.max_repair_rounds = rounds;
     }
 }
 
@@ -522,6 +534,7 @@ mod tests {
             context_conversation: Some(0.4),
             context_files: None,
             jit_enabled: Some(true),
+            ..HarnessContext::default()
         };
         let parsed = from_context(&ctx, Variant::Code);
         assert_eq!(parsed.name, "bundle:code");

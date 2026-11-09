@@ -15,6 +15,7 @@ pub mod eval;
 pub mod jit;
 pub mod manifest;
 pub mod patch;
+pub mod pipeline;
 pub mod profile;
 pub mod store;
 pub mod types;

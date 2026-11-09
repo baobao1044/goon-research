@@ -28,6 +28,8 @@ pub const MEMORY_PATH: &str = "memory.md";
 pub const VERIFY_POLICY_PATH: &str = "policy/verify.json";
 pub const CONTEXT_POLICY_PATH: &str = "policy/context.json";
 pub const JIT_POLICY_PATH: &str = "policy/jit.json";
+pub const LOOP_POLICY_PATH: &str = "policy/loop.json";
+pub const TOOL_REGISTRY_PATH: &str = "tools/registry.json";
 
 /// RFC 3339 UTC timestamp with second precision (repo convention).
 pub fn now_rfc3339() -> String {
@@ -108,6 +110,8 @@ pub enum ComponentKind {
     VerifyPolicy,
     ContextPolicy,
     JitPolicy,
+    LoopPolicy,
+    ToolRegistry,
 }
 
 impl ComponentKind {
@@ -122,6 +126,8 @@ impl ComponentKind {
             ComponentKind::VerifyPolicy => "verify_policy",
             ComponentKind::ContextPolicy => "context_policy",
             ComponentKind::JitPolicy => "jit_policy",
+            ComponentKind::LoopPolicy => "loop_policy",
+            ComponentKind::ToolRegistry => "tool_registry",
         }
     }
 
@@ -136,6 +142,8 @@ impl ComponentKind {
             "verify_policy" => ComponentKind::VerifyPolicy,
             "context_policy" => ComponentKind::ContextPolicy,
             "jit_policy" => ComponentKind::JitPolicy,
+            "loop_policy" => ComponentKind::LoopPolicy,
+            "tool_registry" => ComponentKind::ToolRegistry,
             _ => return None,
         })
     }
@@ -169,6 +177,12 @@ pub fn component_kind_for_path(path: &str) -> Option<ComponentKind> {
     }
     if path == JIT_POLICY_PATH {
         return Some(ComponentKind::JitPolicy);
+    }
+    if path == LOOP_POLICY_PATH {
+        return Some(ComponentKind::LoopPolicy);
+    }
+    if path == TOOL_REGISTRY_PATH {
+        return Some(ComponentKind::ToolRegistry);
     }
     if let Some(rest) = path.strip_prefix("skills/") {
         return rest.ends_with(".md").then_some(ComponentKind::Skill);

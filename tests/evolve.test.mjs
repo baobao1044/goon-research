@@ -35,7 +35,7 @@ test('evolve status reports components and bundles as JSON', async t => {
   const result = await stubCli(f, ['evolve', 'status', '--json']).done;
   assert.equal(result.code, 0, result.stderr);
   const status = JSON.parse(result.stdout.trim());
-  assert.equal(status.total_components, 11, `expected the full seed bundle, got ${status.total_components}`);
+  assert.equal(status.total_components, 13, `expected the full seed bundle, got ${status.total_components}`);
   assert.ok(status.latest_bundle, 'a bundle snapshot exists after init');
   assert.equal(status.rounds, 0);
   assert.equal(status.solved, 0);
@@ -120,13 +120,127 @@ test('digest writes a corpus even when no run failed', async t => {
 test('editing a component changes the snapshot id', async t => {
   const f = await fixture(t);
   assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);
-  const first = JSON.parse((await stubCli(f, ['evolve', 'status', '--json']).done).stdout.trim()).latest_bundle;
+  const first = (await evolve(f, ['evolve', 'init'])).stdout.trim();
+  const firstId = /Bundle (\w+)/.exec(first)?.[1];
+  assert.ok(firstId, `init prints the bundle id: ${first}`);
 
   const middleware = join(f.cwd, '.goon', 'harness', 'middleware.md');
   await writeFile(middleware, `${await readFile(middleware, 'utf8')}\n## manual rule\n- Prefer the smallest diff.\n`);
 
   const reseeded = await evolve(f, ['evolve', 'init']);
   assert.equal(reseeded.code, 0, reseeded.stderr);
-  const second = JSON.parse((await stubCli(f, ['evolve', 'status', '--json']).done).stdout.trim()).latest_bundle;
-  assert.notEqual(first, second, 'component observability: content change yields a new bundle id');
+  const secondId = /Bundle (\w+)/.exec(reseeded.stdout.trim())?.[1];
+  assert.ok(secondId, `init prints the bundle id: ${reseeded.stdout}`);
+  assert.notEqual(firstId, secondId, 'component observability: content change yields a new bundle id');
+
+  const status = JSON.parse((await stubCli(f, ['evolve', 'status', '--json']).done).stdout.trim());
+  assert.equal(status.latest_bundle, secondId, 'latest bundle follows append order');
+});
+
+test('a bundle-declared tool becomes a real callable tool', async t => {
+  const f = await fixture(t);
+  assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);
+
+  // tools/registry.json is an editable component: an evolution patch can add a tool, not just prose.
+  const registry = join(f.cwd, '.goon', 'harness', 'tools', 'registry.json');
+  await writeFile(
+    registry,
+    JSON.stringify({
+      version: 1,
+      tools: [
+        {
+          name: 'say',
+          description: 'Echo a word through the shell.',
+          command: 'echo {word} > tool-output.txt',
+          args: ['word'],
+          parameters: { type: 'object', properties: { word: { type: 'string' } }, required: ['word'] },
+          readOnly: true,
+        },
+      ],
+    }),
+  );
+  const reseeded = await evolve(f, ['evolve', 'init']);
+  assert.equal(reseeded.code, 0, reseeded.stderr);
+  const status = JSON.parse((await stubCli(f, ['evolve', 'status', '--json']).done).stdout.trim());
+
+  const fixturePath = join(f.root, 'stub-tool.json');
+  await writeFile(
+    fixturePath,
+    JSON.stringify({
+      v: 1,
+      turns: [
+        { match: 'call the tool', toolCalls: [{ id: 'call-say-1', name: 'say', input: { word: 'hello-bundle' } }] },
+        { text: ['Tool returned.'] },
+      ],
+    }),
+  );
+  const run = await stubCli(f, ['--bundle', status.latest_bundle, '--stub-fixture', fixturePath, '--yes', '-p', 'call the tool']).done;
+  assert.equal(run.code, 0, `run failed: ${run.stderr}`);
+  // The tool runs the bundle's command template inside the workspace, so its side effect proves
+  // the tool was registered, dispatched and approved rather than merely described in the prompt.
+  const produced = await readFile(join(f.cwd, 'tool-output.txt'), 'utf8');
+  assert.equal(produced.trim(), 'hello-bundle');
+});
+
+test('loop policy bounds the harness step count', async t => {
+  const f = await fixture(t);
+  assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);
+  const loop = join(f.cwd, '.goon', 'harness', 'policy', 'loop.json');
+  await writeFile(loop, JSON.stringify({ version: 1, maxSteps: 1, verifyRetries: 0 }));
+  assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);
+  const status = JSON.parse((await stubCli(f, ['evolve', 'status', '--json']).done).stdout.trim());
+
+  // Two consecutive tool turns need two steps, so a cap of one must stop the run.
+  const fixturePath = join(f.root, 'stub-loop.json');
+  await writeFile(
+    fixturePath,
+    JSON.stringify({
+      v: 1,
+      turns: [
+        { match: 'loop forever', toolCalls: [{ id: 'call-1', name: 'read_file', input: { path: 'missing-1.txt' } }] },
+        { toolCalls: [{ id: 'call-2', name: 'read_file', input: { path: 'missing-2.txt' } }] },
+        { text: ['unreachable'] },
+      ],
+    }),
+  );
+  const run = await stubCli(f, ['--bundle', status.latest_bundle, '--stub-fixture', fixturePath, '-p', 'loop forever']).done;
+  assert.notEqual(run.code, 0, 'the step limit stops the run');
+  assert.match(`${run.stdout}\n${run.stderr}`, /step limit/i);
+});
+
+test('attribution gate refuses a re-edit without a diagnosis', async t => {
+  const f = await fixture(t);
+  assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);
+  // A verify command that fails durably, plus enough repair rounds for a second edit attempt.
+  const verify = join(f.cwd, '.goon', 'harness', 'policy', 'verify.json');
+  await writeFile(verify, JSON.stringify({ version: 1, commands: ['node does-not-exist.js'], maxRepairRounds: 3 }));
+  assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);
+  const status = JSON.parse((await stubCli(f, ['evolve', 'status', '--json']).done).stdout.trim());
+
+  const fixturePath = join(f.root, 'stub-attr.json');
+  await writeFile(
+    fixturePath,
+    JSON.stringify({
+      v: 1,
+      turns: [
+        { match: 'edit then retry', toolCalls: [{ id: 'w1', name: 'write_file', input: { path: 'a.txt', content: 'one' } }] },
+        { match: 'Verification failed', toolCalls: [{ id: 'w2', name: 'write_file', input: { path: 'a.txt', content: 'two' } }] },
+        { match: 'attribution', text: ['Observed: verify fails. Expected: green. Diagnosis: missing fixture. Evidence: exit 1.'] },
+        { text: ['done'] },
+      ],
+    }),
+  );
+  const run = await stubCli(f, ['--bundle', status.latest_bundle, '--yes', '--stub-fixture', fixturePath, '--event-log', '-p', 'edit then retry']).done;
+  assert.notEqual(run.code, 0, 'the run ends on the unresolved verification failure');
+
+  const sessionDir = join(f.data, 'goon', 'sessions');
+  const logs = (await readdir(sessionDir)).filter(name => name.endsWith('.events.jsonl'));
+  const body = await readFile(join(sessionDir, logs.sort().at(-1)), 'utf8');
+  const events = body.trim().split('\n').map(line => JSON.parse(line));
+  const gated = events.find(event => event.type === 'attribution_required');
+  assert.ok(gated, `expected an attribution_required event, saw ${events.map(event => event.type).join(',')}`);
+  assert.match(gated.event.message, /<attribution>/);
+  // The refused edit never reached the workspace.
+  const a = await readFile(join(f.cwd, 'a.txt'), 'utf8').catch(() => '');
+  assert.notEqual(a.trim(), 'two', 'the gated write was not applied');
 });
