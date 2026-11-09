@@ -51,6 +51,14 @@ pub fn decide(before: &RunSummary, after: &RunSummary, dev: Option<(&RunSummary,
         return GateDecision::reject(format!("gain {:.1}pp below required {:.1}pp", gain_pp, gate.min_gain_pp));
     }
 
+    // (c2) A round that fixed nothing is not an improvement, even when nothing regressed.
+    let fixed: Vec<String> = after.passed_ids().difference(&before.passed_ids()).cloned().collect();
+    let still_failing = after.failed_ids();
+    let untouched = still_failing.intersection(&before.failed_ids()).count();
+    if fixed.is_empty() && untouched == before.failed_ids().len() && untouched > 0 {
+        return GateDecision::reject("no task was fixed: the edit did not change any outcome".to_string());
+    }
+
     // (d) Durability gate: an edit that only holds on the train split is not durable.
     if gate.require_dev {
         if let Some((dev_before, dev_after)) = dev {

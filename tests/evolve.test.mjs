@@ -46,11 +46,12 @@ test('evolve run refuses to accept an unmeasured round', async t => {
   assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);
   const before = await readFile(join(f.cwd, '.goon', 'harness', 'middleware.md'), 'utf8');
 
-  // --dry-run evaluates nothing, so the gate must reject instead of durably changing the harness.
+  // A dry round evaluates nothing and has no evidence, so it must be refused rather than
+  // durably changing the harness.
   const result = await evolve(f, ['evolve', 'run', '--dry-run']);
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /REJECTED/i, 'dry round must not be accepted');
-  assert.match(result.stdout, /no tasks measured/i);
+  assert.match(result.stdout, /no actionable evidence|no tasks measured/i);
 
   const after = await readFile(join(f.cwd, '.goon', 'harness', 'middleware.md'), 'utf8');
   assert.equal(after, before, 'a rejected round leaves the workspace bundle untouched');
@@ -59,9 +60,8 @@ test('evolve run refuses to accept an unmeasured round', async t => {
   const manifests = JSON.parse(log.stdout.trim());
   assert.equal(manifests.length, 1);
   assert.equal(manifests[0].accepted, false);
-  // Decision observability: the edit is still recorded with a prediction for the next round.
-  assert.ok(manifests[0].entries.length >= 1);
-  assert.ok(manifests[0].entries[0].prediction, 'manifest entries carry predictions');
+  assert.equal(manifests[0].entries.length, 0, 'a round without evidence proposes no edit');
+  assert.match(manifests[0].reject_reason, /no actionable evidence/i);
 });
 
 test('evolve jit plans a harness for one task without a model call', async t => {

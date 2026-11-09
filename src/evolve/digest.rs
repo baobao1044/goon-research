@@ -207,8 +207,13 @@ impl TaskAccumulator {
 
     fn finish(self, task_id: &str) -> TaskDigest {
         // A failed verification is the task-level verdict: it outranks intermediate tool errors.
-        let failure = if self.verify_failed { Some(FailureSignal::VerifyFail) } else { self.failure };
+        let mut failure = if self.verify_failed { Some(FailureSignal::VerifyFail) } else { self.failure };
         let passed = failure.is_none() && (self.completed_ok || self.verify_passed);
+        // A run that ended without any completion marker still failed; without this the session
+        // would be counted but contribute no evidence, which is how a real failure goes missing.
+        if !passed && failure.is_none() {
+            failure = Some(FailureSignal::Other("task ended without a completion marker".to_string()));
+        }
         let mut key_events = self.key_events;
         if self.tool_calls > 0 {
             // `TaskDigest` has no dedicated counter; the L1 tool-call count rides here.
@@ -236,7 +241,7 @@ fn scan_session(envelopes: &[EventEnvelope], clusters: &mut BTreeMap<(String, St
     for envelope in envelopes {
         let event = &envelope.event;
         let kind = if envelope.kind.is_empty() { event.get("type").and_then(Value::as_str).unwrap_or_default() } else { envelope.kind.as_str() };
-        if kind == "task_started" {
+        if kind == "task_started" || kind == "task_start" {
             if let Some(task_id) = task_id_from_event(event) {
                 current = task_id;
             }
@@ -244,6 +249,7 @@ fn scan_session(envelopes: &[EventEnvelope], clusters: &mut BTreeMap<(String, St
         let accumulator = accumulators.entry(current.clone()).or_insert_with(|| TaskAccumulator::new(&session_id));
         match kind {
             "task_started" => accumulator.key_events.push("task_started".to_string()),
+            "task_start" => accumulator.key_events.push("task_start".to_string()),
             "usage" => {
                 accumulator.steps = accumulator.steps.saturating_add(1);
                 accumulator.tokens = accumulator.tokens.saturating_add(usage_tokens(event));
@@ -320,6 +326,18 @@ fn scan_session(envelopes: &[EventEnvelope], clusters: &mut BTreeMap<(String, St
     }
     for (task_id, accumulator) in accumulators {
         let digest = accumulator.finish(&task_id);
+        // Ensure every failing task leaves a cluster even when the failure was inferred at finish
+        // time (missing completion marker) rather than recorded from a single event.
+        if let Some(signal) = digest.failure.as_ref() {
+            let text = match signal {
+                crate::evolve::types::FailureSignal::Other(raw) => raw.clone(),
+                other => other.as_str().to_string(),
+            };
+            let has_cluster = clusters.keys().any(|(kind, _)| kind == signal.as_str());
+            if !has_cluster {
+                record_failure(clusters, &text, &task_id, &session_id);
+            }
+        }
         match digests.get_mut(&task_id) {
             Some(existing) => merge_digest(existing, digest),
             None => {

@@ -672,8 +672,13 @@ pub fn credentials_path() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
-    let base = env_nonempty("GOON_DATA_DIR").or_else(|| env_nonempty("XDG_DATA_HOME")).map(PathBuf::from).unwrap_or_else(|| jsutil::home_dir().join(".local").join("share"));
-    base.join("goon")
+    data_base().join("goon")
+}
+
+/// The directory *above* `data_dir()`: this is the value `GOON_DATA_DIR` must carry, because
+/// `data_dir()` appends `goon` to it. Passing `data_dir()` itself nests a second `goon/`.
+pub fn data_base() -> PathBuf {
+    env_nonempty("GOON_DATA_DIR").or_else(|| env_nonempty("XDG_DATA_HOME")).map(PathBuf::from).unwrap_or_else(|| jsutil::home_dir().join(".local").join("share"))
 }
 
 /// Creates a directory tree with mode 0700 on POSIX (`mkdir(..., { recursive: true, mode: 0o700 })`).

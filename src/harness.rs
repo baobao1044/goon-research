@@ -141,21 +141,13 @@ fn register_dynamic_tools(tools: &Arc<ToolRegistry>, ctx: &crate::evolve::bundle
                     command = command.replace(&format!("{{{arg}}}"), &safe);
                 }
                 let options = crate::process::RunOptions { cwd: &cwd, cancel: &cancel, timeout_ms: 120_000, env: None, output_limit_bytes: Some(200_000), hard_output_bytes: Some(400_000) };
-                match crate::process::run_command(shell_program(), &shell_args(&command), options).await {
+                match crate::process::run_shell(&command, options).await {
                     Ok(result) => Ok(result.output),
                     Err(error) => Err(crate::process::command_error_to_anyhow(error)),
                 }
             })
         });
         let _ = tools.register_json(&name, &tool.description, &tool.parameters, tool.read_only, None, Some(tool.network), Some(true), exec);
-    }
-}
-
-fn shell_program() -> &'static str {
-    if cfg!(windows) {
-        "cmd"
-    } else {
-        "sh"
     }
 }
 
@@ -175,14 +167,6 @@ fn safe_tool_arg(value: &str) -> Result<String> {
         bail!("tool argument contains characters that are not allowed: {value:?}");
     }
     Ok(value.to_string())
-}
-
-fn shell_args<T: AsRef<str>>(command: &T) -> Vec<String> {
-    if cfg!(windows) {
-        vec!["/C".to_string(), command.as_ref().to_string()]
-    } else {
-        vec!["-c".to_string(), command.as_ref().to_string()]
-    }
 }
 
 /// The user cancelled (Ctrl-C / signal).
@@ -1387,12 +1371,13 @@ impl Harness {
         }
         self.drain_pending_context();
         self.ensure_repo_index_once().await;
-        self.memory_event(json!({ "type": "task_started", "task": prompt, "taskId": std::env::var("GOON_TASK_ID").ok().filter(|v| !v.is_empty()) }));
+        let task_event = json!({ "type": "task_started", "task": prompt, "taskId": std::env::var("GOON_TASK_ID").ok().filter(|v| !v.is_empty()) });
+        self.memory_event(task_event);
         if let Some(bundle_id) = &self.harness_bundle_id {
             let components = self.harness_bundle.as_ref().map(|ctx| ctx.skills.len()).unwrap_or(0);
             self.emit(json!({ "type": "harness", "bundle": bundle_id, "skills": components, "jit": self.harness_bundle.as_ref().map(|ctx| ctx.jit_enabled.unwrap_or(false)).unwrap_or(false) }));
         }
-        self.dispatch_hook(crate::evolve::pipeline::Hook::TaskStart, json!({ "type": "task_start" }), None, false);
+        self.dispatch_hook(crate::evolve::pipeline::Hook::TaskStart, json!({ "type": "task_start", "taskId": std::env::var("GOON_TASK_ID").ok().filter(|v| !v.is_empty()) }), None, false);
         let budget_config = ContextBudgetConfig::from_config(&self.config);
         let pre = allocate_context_budget(&budget_config, "");
         let untrusted = *self.untrusted_prompts.lock().unwrap();

@@ -189,9 +189,46 @@ fn kill_tree(pid: u32) {
     let _ = std::process::Command::new("taskkill").args(["/pid", &pid.to_string(), "/T", "/F"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
+/// Runs a shell line (`cmd /C` on Windows, `sh -c` elsewhere) with the same limits as
+/// `run_command`.
+///
+/// On Windows the line is appended with `raw_arg`: passing it as a normal argument makes the
+/// runtime re-quote it, which silently mangles any embedded `"` and can make a failing command
+/// report success.
+pub async fn run_shell(line: &str, options: RunOptions<'_>) -> std::result::Result<CommandResult, CommandError> {
+    #[cfg(windows)]
+    {
+        let line = line.to_string();
+        run_command_with("cmd", &[], options, move |cmd| {
+            cmd.raw_arg("/C").raw_arg(line);
+        })
+        .await
+    }
+    #[cfg(not(windows))]
+    {
+        let args = vec!["-c".to_string(), line.to_string()];
+        run_command("sh", &args, options).await
+    }
+}
+
+/// Same as `run_command`, with a hook that customises the command line before spawn.
+#[cfg(windows)]
+async fn run_command_with<F>(command: &str, args: &[String], options: RunOptions<'_>, extra: F) -> std::result::Result<CommandResult, CommandError>
+where
+    F: FnOnce(&mut tokio::process::Command) + Send + 'static,
+{
+    run_command_inner(command, args, options, Some(Box::new(extra) as Box<dyn FnOnce(&mut tokio::process::Command) + Send>)).await
+}
+
 /// Runs a command with a timeout, cancellation and bounded head/tail output capture. The child gets
 /// its own process group (POSIX) so cancellation reaches grandchildren too.
 pub async fn run_command(command: &str, args: &[String], options: RunOptions<'_>) -> std::result::Result<CommandResult, CommandError> {
+    run_command_inner(command, args, options, None).await
+}
+
+type CommandCustomizer = Option<Box<dyn FnOnce(&mut tokio::process::Command) + Send>>;
+
+async fn run_command_inner(command: &str, args: &[String], options: RunOptions<'_>, customize: CommandCustomizer) -> std::result::Result<CommandResult, CommandError> {
     if options.cancel.is_cancelled() {
         return Err(CommandError::Cancelled);
     }
@@ -216,6 +253,9 @@ pub async fn run_command(command: &str, args: &[String], options: RunOptions<'_>
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    if let Some(customize) = customize {
+        customize(&mut cmd);
     }
     let mut child = match cmd.spawn() {
         Ok(child) => child,

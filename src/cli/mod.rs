@@ -565,7 +565,9 @@ pub async fn main(argv: Vec<String>) -> i32 {
         if ctx().json.load(Ordering::SeqCst) {
             write_json_line(&json!({ "type": "error", "message": message }));
         } else {
-            stderr_write(&format!("goon: {message}\n"));
+            // `{:#}` keeps the context chain: "round failed" alone is not actionable.
+            let chain = crate::redact::redact_secrets(&format!("{error:#}"), &collect_secrets());
+            stderr_write(&format!("goon: {}\n", terminal_text(&chain)));
         }
         let code = exit_code();
         if code != 130 && code != 143 {

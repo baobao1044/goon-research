@@ -137,7 +137,7 @@ impl Proposer for HeuristicProposer {
                         proposal.prediction = Prediction { expected_fix: item.tasks.clone(), at_risk: vec![], expected_gain_pp: 1.0, confidence: 0.3 };
                         patches.push(proposal);
                     }
-                    FailureSignal::NoAnswer | FailureSignal::ParseError => {
+                    FailureSignal::NoAnswer | FailureSignal::ParseError | FailureSignal::Other(_) => {
                         let mut proposal = HeuristicProposer::component_patch(
                             ctx.files,
                             ComponentKind::Middleware,
@@ -145,27 +145,16 @@ impl Proposer for HeuristicProposer {
                             Some("final answer"),
                             "End every turn with a non-empty final answer in plain text; never end on a tool call alone.".to_string(),
                         );
-                        proposal.rationale = format!("missing/empty answers x{}", item.occurrences);
+                        proposal.rationale = format!("runs ending without a completion marker x{}", item.occurrences);
                         proposal.evidence = evidence;
                         proposal.prediction = Prediction { expected_fix: item.tasks.clone(), at_risk: vec![], expected_gain_pp: 1.0, confidence: 0.3 };
                         patches.push(proposal);
                     }
-                    _ => {}
+                    FailureSignal::BudgetExceeded | FailureSignal::Timeout | FailureSignal::ApprovalDenied => {}
                 }
             }
-            if patches.is_empty() {
-                // Nothing actionable: emit a single memory lesson so the round is still falsifiable.
-                let mut proposal = HeuristicProposer::component_patch(
-                    ctx.files,
-                    ComponentKind::MemoryPolicy,
-                    PatchAction::AppendSection,
-                    Some("lessons"),
-                    format!("Round {}: no dominant failure cluster; keep the current harness.", ctx.round),
-                );
-                proposal.rationale = "no failure cluster above threshold".into();
-                proposal.prediction = Prediction { expected_fix: vec![], at_risk: vec![], expected_gain_pp: 0.0, confidence: 0.0 };
-                patches.push(proposal);
-            }
+            // No actionable cluster means no falsifiable edit: return nothing instead of
+            // inventing a no-op patch that would then be accepted for lack of evidence.
             Ok(patches)
         })
     }
@@ -246,6 +235,8 @@ pub struct EngineOptions {
     pub max_rounds: u32,
     pub dry_run: bool,
     pub eval_path: PathBuf,
+    /// Held-out split for the durability gate; defaults to `dev.json` next to `eval_path`.
+    pub dev_path: Option<PathBuf>,
     pub eval_max_tasks: usize,
     pub goon_bin: PathBuf,
     pub stub: bool,
@@ -260,6 +251,7 @@ impl Default for EngineOptions {
             max_rounds: 1,
             dry_run: false,
             eval_path: PathBuf::from("eval/tasks.json"),
+            dev_path: None,
             eval_max_tasks: 10,
             goon_bin: PathBuf::from("goon"),
             stub: false,
@@ -372,7 +364,7 @@ pub async fn run_round(
             goon_bin: opts.goon_bin.clone(),
             workspace: workspace.to_path_buf(),
             bundle: Some(base.id.clone()),
-            data_dir: Some(crate::config::data_dir()),
+            data_dir: Some(crate::config::data_base()),
             stub: opts.stub,
             max_tasks: opts.eval_max_tasks.max(1),
             timeout_ms: 120_000,
@@ -394,9 +386,41 @@ pub async fn run_round(
     let propose_ctx = ProposeContext { corpus: &corpus, digests: &digests, files: &files, bundle: &base, round: opts.round, max_rounds: opts.max_rounds, rule: opts.rule.as_deref() };
     let proposed = proposer.propose(&propose_ctx).await?;
     let order = patch::phased(&proposed, opts.round, opts.max_rounds, config.phased_patches);
-    let selected: Vec<TargetedPatch> = order.iter().filter_map(|index| proposed.get(*index)).cloned().collect();
+    let mut seen: Vec<String> = Vec::new();
+    let selected: Vec<TargetedPatch> = order
+        .iter()
+        .filter_map(|index| proposed.get(*index))
+        // Two clusters can imply the same edit; applying it twice is noise, not progress.
+        .filter(|patch| {
+            let key = format!("{:?}|{:?}", patch.kind, patch.ops);
+            if seen.contains(&key) {
+                false
+            } else {
+                seen.push(key);
+                true
+            }
+        })
+        .cloned()
+        .collect();
     if selected.is_empty() {
-        bail!("no patches selected for round {}", opts.round);
+        // Nothing actionable in the traces: refuse the round instead of accepting a no-op patch.
+        // This is a normal outcome (a healthy harness has no dominant failure cluster).
+        let decision = GateDecision::reject("no actionable evidence: no failure cluster above threshold".to_string());
+        let manifest = manifest::build(opts.round, &base, &base, &[], &before, None, None, &decision);
+        store.save_manifest(&manifest)?;
+        return Ok(RoundOutcome {
+            accepted: false,
+            base,
+            candidate: None,
+            manifest: Some(manifest),
+            decision,
+            before,
+            after: None,
+            dev_before: None,
+            dev_after: None,
+            patches: vec![],
+            evidence: corpus,
+        });
     }
     if cancel.is_cancelled() {
         bail!("cancelled before patch application");
@@ -441,7 +465,7 @@ pub async fn run_round(
             goon_bin: opts.goon_bin.clone(),
             workspace: workspace.to_path_buf(),
             bundle: Some(candidate.id.clone()),
-            data_dir: Some(crate::config::data_dir()),
+            data_dir: Some(crate::config::data_base()),
             stub: opts.stub,
             max_tasks: opts.eval_max_tasks.max(1).min(if config.max_tasks > 0 { config.max_tasks } else { usize::MAX }),
             timeout_ms: 120_000,
@@ -450,13 +474,20 @@ pub async fn run_round(
         eval::run(&set, &eval_opts).await?
     };
     let dev = if config.require_dev_gate && !opts.dry_run {
-        match eval::load(&opts.eval_path, Split::Dev) {
+        // The dev split is a separate file: measuring it from the train file would make the
+        // durability gate a copy of the train gate. `train.json` implies `dev.json`.
+        let dev_path = opts.dev_path.clone().unwrap_or_else(|| {
+            let stem = opts.eval_path.file_stem().map(|stem| stem.to_string_lossy().to_string()).unwrap_or_default();
+            let sibling = if stem.contains("train") { stem.replace("train", "dev") } else { format!("{stem}.dev") };
+            opts.eval_path.with_file_name(format!("{sibling}.json"))
+        });
+        match eval::load(&dev_path, Split::Dev) {
             Ok(set) if !set.tasks.is_empty() => {
                 let base_opts = EvalOptions {
                     goon_bin: opts.goon_bin.clone(),
                     workspace: workspace.to_path_buf(),
                     bundle: Some(base.id.clone()),
-                    data_dir: Some(crate::config::data_dir()),
+                    data_dir: Some(crate::config::data_base()),
                     stub: opts.stub,
                     max_tasks: set.tasks.len(),
                     timeout_ms: 120_000,

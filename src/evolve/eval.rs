@@ -221,6 +221,8 @@ async fn judge_task(task: &EvalTask, opts: &EvalOptions, root: &Path) -> Result<
     let mut command = goon_command(&opts.goon_bin);
     command
         .arg("--yes")
+        // Experience observability reads event logs, so every eval run must write one.
+        .arg("--event-log")
         .arg(format!("--prompt={}", task.prompt))
         .current_dir(root)
         .stdin(Stdio::null())
@@ -331,20 +333,14 @@ async fn verify_all(commands: &[String], root: &Path, timeout_ms: u64) -> Result
 }
 
 async fn verify_one(command: &str, root: &Path, timeout_ms: u64) -> Result<bool> {
-    let (program, args) = shell_command(command);
-    let child = tokio::process::Command::new(&program)
-        .args(&args)
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|error| anyhow!("spawn verify `{command}`: {error}"))?;
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await {
-        Ok(Ok(output)) => Ok(output.status.success()),
-        // A verify command that cannot be waited for simply did not pass.
-        Ok(Err(_)) | Err(_) => Ok(false),
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let options = crate::process::RunOptions { cwd: root, cancel: &cancel, timeout_ms, env: None, output_limit_bytes: Some(200_000), hard_output_bytes: Some(400_000) };
+    // `run_shell` keeps the command line opaque on Windows; re-quoting it as an argv element
+    // mangles embedded quotes and can turn a failing verify into a passing one.
+    match crate::process::run_shell(command, options).await {
+        Ok(result) => Ok(result.code == 0),
+        // A verify command that cannot be run simply did not pass.
+        Err(_) => Ok(false),
     }
 }
 

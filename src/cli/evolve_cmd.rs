@@ -224,6 +224,7 @@ async fn run_round_cmd(values: &Parsed, config: &Config) -> Result<()> {
         max_rounds,
         dry_run: values.flag("dry-run"),
         eval_path: eval_path(values, config),
+        dev_path: values.str("dev-tasks").map(PathBuf::from),
         eval_max_tasks: values.str("max-tasks").and_then(|raw| raw.parse().ok()).unwrap_or(config.evolve.max_tasks.max(1)),
         goon_bin: values.str("goon-bin").map(PathBuf::from).or_else(|| std::env::current_exe().ok()).unwrap_or_else(|| PathBuf::from("goon")),
         stub: values.flag("stub") || config.stub,
@@ -257,12 +258,12 @@ async fn run_round_cmd(values: &Parsed, config: &Config) -> Result<()> {
         return Ok(());
     }
     stdout_write(&format!(
-        "round {}  base {}\n  patches        {}\n  train before   {:.1}%  after {:.1}%\n",
+        "round {}  base {}\n  patches        {}\n  train before   {:.1}%  after {}\n",
         round,
         outcome.base.id,
         outcome.patches.len(),
         outcome.before.pass_rate() * 100.0,
-        outcome.after.as_ref().map(|run| run.pass_rate() * 100.0).unwrap_or(0.0)
+        outcome.after.as_ref().map(|run| format!("{:.1}%", run.pass_rate() * 100.0)).unwrap_or_else(|| "not measured".into())
     ));
     if let (Some(before), Some(after)) = (&outcome.dev_before, &outcome.dev_after) {
         stdout_write(&format!("  dev   before   {:.1}%  after {:.1}%\n", before.pass_rate() * 100.0, after.pass_rate() * 100.0));
@@ -369,7 +370,7 @@ async fn eval_cmd(values: &Parsed, config: &Config) -> Result<()> {
         goon_bin: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("goon")),
         workspace: ws,
         bundle: bundle_id.clone(),
-        data_dir: Some(config::data_dir()),
+        data_dir: Some(config::data_base()),
         stub: values.flag("stub") || config.stub,
         max_tasks: values.str("max-tasks").and_then(|raw| raw.parse().ok()).unwrap_or(config.evolve.max_tasks.max(1)),
         timeout_ms: 120_000,

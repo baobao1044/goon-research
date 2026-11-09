@@ -84,6 +84,7 @@ pub const MAIN_OPTIONS: &[OptSpec] = &[
     b("model-proposer", None),
     b("run", None),
     s("tasks", None),
+    s("dev-tasks", None),
     s("max-tasks", None),
     s("goon-bin", None),
 ];
