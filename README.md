@@ -447,6 +447,10 @@ goon evolve log
 goon --bundle <id> -p 'sửa lỗi này'  # áp bundle cho một phiên
 ```
 
+Benchmark kiểu FrontierCode (mergeability: blockers + weighted criteria + fair-internet-use): xem
+[docs/BENCHMARK-FRONTIERCODE.md](docs/BENCHMARK-FRONTIERCODE.md) — kèm số liệu chạy thật và lý do
+không thể báo điểm FrontierCode gốc (benchmark đóng).
+
 Kiến trúc đầy đủ, mapping với 6 paper (AHE, HarnessX, JIT-Agent, Anatomy, Runtime Substrate,
 AutoSaddler) và các giới hạn đã biết: [docs/ARCHITECTURE-HARNESS-EVOLUTION.md](docs/ARCHITECTURE-HARNESS-EVOLUTION.md).
 Trạng thái lưu tại `{data_dir}/harness/` (`snapshots/`, `manifests/`, `runs/`, `digest/`,
