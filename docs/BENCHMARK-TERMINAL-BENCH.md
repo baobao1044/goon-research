@@ -3,69 +3,72 @@
 Target: <https://www.tbench.ai/> — Terminal-Bench 4.1, run through Harbor
 (<https://github.com/harbor-framework/terminal-bench>).
 
-## What was prepared on this machine
+## Verified working (2026-11-10)
 
-| Step | Result |
+The benchmark now **runs on this machine**, inside WSL2:
+
+| Component | Version / state |
 |---|---|
-| `uv tool install harbor` | installed (`harbor`, `hb`, `hr` on PATH) |
-| `harbor download terminal-bench/terminal-bench@4.1.0` | **66 tasks** downloaded to `~/terminal-bench` |
-| `harbor job start ... --dry-run` | config resolves, agent/env/auth preflight runs |
-| `harbor job start ... -e docker` | **blocked**: `Docker is not installed or not on PATH.` |
+| WSL | enabled, `Ubuntu-26.04`, systemd running, root shell |
+| Docker | 29.1.3, `overlayfs`, daemon started via `service docker start` |
+| docker compose | v2.40.3 (`docker-compose-v2`) — the plain `docker.io` package ships without it and harbor fails with `unknown flag: --project-name` |
+| harbor | 0.25.0 via `uv tool install harbor` |
+| dataset | `terminal-bench/terminal-bench@4.1.0`, 66 tasks |
 
-Task layout confirmed on disk: `instruction.md`, `solution/`, `tests/`, `environment/Dockerfile`,
-`task.toml` (per-task verifier timeout, `environment_mode = "separate"`, GPU-requiring tasks
-included).
+Both control agents produce the expected grade, which is what proves the harness and the
+verifier are wired correctly:
 
-## Why it cannot run here
+| Agent | Task | Trials | Exceptions | Mean reward |
+|---|---|---|---|---|
+| `oracle` (runs the task's own solution) | `terminal-bench/html-js-filter` | 1 | 0 | **1.000** |
+| `nop` (does nothing) | `terminal-bench/html-js-filter` | 1 | 0 | **0.000** |
 
-Terminal-Bench executes every task inside a container image built from the task's `Dockerfile`.
-Harbor's environment backends are: `docker`, `podman`, `singularity`, `apple-container`, `kata`,
-`dind`, and the cloud providers (`modal`, `daytona`, `e2b`, `runloop`, `prime`, `beam`, `ec2`,
-`gke`, …). There is **no host-process backend**, and this machine has:
-
-- no Docker / Podman / WSL (WSL2 is not installed, and installing it needs admin + reboot),
-- no Modal token or other cloud sandbox credentials,
-- no provider API keys for the catalogue agents.
-
-So the honest status is: **dataset and runner installed, execution blocked by the missing
-sandbox**. No resolution rate is reported here, because any number produced without the task
-images would be a fake Terminal-Bench score.
-
-## To unblock
-
-Either install a runtime (needs administrator rights):
-
-```powershell
-wsl --install            # then install Docker Desktop, or podman desktop
-```
-
-or point Harbor at a cloud sandbox (needs an account):
-
-```powershell
-uv tool install 'harbor[modal]'
-modal token new
-```
-
-Then a real run is:
+Run command that works (note the timeout multiplier — WSL2's first environment start is slow;
+without it harbor raises `EnvironmentStartTimeoutError` after 600s):
 
 ```bash
-harbor run -d terminal-bench/terminal-bench@4.1.0 \
-  -e docker            # or -e modal \
-  -a <agent> -m <model> -k 5
-harbor view jobs
+wsl -d Ubuntu-26.04 -e bash -lc '
+  export PATH="$HOME/.local/bin:$PATH"; service docker start; sleep 2; cd /root
+  harbor run -d terminal-bench/terminal-bench@4.1.0 -e docker -a oracle \
+    -i "terminal-bench/html-js-filter" -l 1 -n 1 -y --timeout-multiplier 4.0'
 ```
 
-## What "benchmark goon" would additionally require
+Notes that cost time to discover:
+
+- Task filters need the fully qualified name (`terminal-bench/html-js-filter`), not the short
+  directory name.
+- Five of the 66 tasks require a GPU (`fp8-rmsnorm-gemm`, `jax-speedrun-gpu`, `math-eval-grader`,
+  `vllm-deepseek-streaming`, `vpp-loss-divergence`). Exclude them on a CPU-only host.
+- The verifier runs in its own environment (`environment_mode = "separate"`) and its start is the
+  slowest step; the multiplier applies to it too.
+
+## Remaining blocker for a real model
+
+The model gateway on Windows binds `0.0.0.0:20128`, but the WSL vNIC cannot reach it — Windows
+Firewall drops the inbound connection (`curl http://192.168.32.1:20128/v1/models` from WSL returns
+empty). Two ways to close it:
+
+```powershell
+# 1. allow the WSL subnet through the firewall (administrator)
+New-NetFirewallRule -DisplayName "WSL gateway 20128" -Direction Inbound `
+  -InterfaceAlias "vEthernet (WSL)" -LocalPort 20128 -Protocol TCP -Action Allow
+```
+
+or point the agent at a provider that the container can reach and pass the key with `--ae`
+(`harbor run ... -a <agent> -m <model> --base-url ... --api-format openai_chat_completions`).
+
+## What "benchmark goon" additionally requires
 
 Harbor drives a fixed catalogue of agents (`harbor agent list`) or a custom agent passed as
 `-a module.path:ClassName`. `goon` is not in the catalogue and does not speak ACP, so running it
-needs an adapter class implementing `harbor.agents.base.BaseAgent`:
+needs an adapter class on Harbor's side:
 
 1. install the `goon` binary inside the task environment (or bind-mount it),
 2. translate the task instruction into `goon --yes -p '<instruction>'`,
 3. stream/capture its event log into the trial's trajectory directory,
 4. report model/token usage back through the agent context.
 
-That adapter is pure Python on Harbor's side and does not touch the benchmark's tasks or verifier,
-which is the property that keeps results comparable. It is the next piece of work; it cannot be
-validated on this machine until a container runtime exists.
+The adapter is pure host-side Python and leaves the tasks and the verifier untouched, which is
+what keeps the numbers comparable. Its prerequisite is the working sandbox above, which now
+exists.
+
