@@ -216,6 +216,23 @@ pub struct HarnessDeps {
 
 pub const MAX_API_RETRIES: u32 = 3;
 pub const MAX_PARALLEL_READS: usize = 8;
+/// Cap on independent, path-disjoint mutations executed at once.
+pub const MAX_PARALLEL_MUTATIONS: usize = 4;
+
+/// The file a mutating call targets, or `None` when it does not write exactly one known path.
+///
+/// Used only to decide whether two mutations are independent; anything ambiguous (patches that
+/// touch several files, shell commands, unknown tools) returns `None` and stays sequential.
+fn mutation_target(call: &ToolCall) -> Option<String> {
+    if !matches!(call.tool_name.as_str(), "write_file" | "edit_file") {
+        return None;
+    }
+    let input = crate::tools::normalize_tool_input(&call.tool_name, &call.input);
+    match input.get("path").and_then(Value::as_str) {
+        Some(path) if !path.trim().is_empty() => Some(path.trim().to_string()),
+        _ => None,
+    }
+}
 const RETRY_BASE_MS: f64 = 250.0;
 const RETRY_MAX_MS: f64 = 8_000.0;
 const RETRY_MAX_AFTER_MS: f64 = 20_000.0;
@@ -1874,6 +1891,22 @@ impl Harness {
                     group.push(calls[index].clone());
                     index += 1;
                 }
+            } else if let Some(first_path) = mutation_target(&group[0]) {
+                // Parallel mutations are safe only when they cannot see each other: same tool,
+                // same kind of write, and a set of target paths that is pairwise disjoint.
+                let mut paths = vec![first_path];
+                while group.len() < MAX_PARALLEL_MUTATIONS && index < calls.len() {
+                    let Some(next_path) = mutation_target(&calls[index]) else { break };
+                    if calls[index].tool_name != group[0].tool_name {
+                        break;
+                    }
+                    if paths.iter().any(|existing| existing == &next_path) {
+                        break;
+                    }
+                    paths.push(next_path);
+                    group.push(calls[index].clone());
+                    index += 1;
+                }
             }
             let futures = group.into_iter().map(|call| self.execute_one(call, cancel.clone(), flags.clone()));
             let results = futures_util::future::join_all(futures).await;
@@ -1907,6 +1940,18 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutation_targets_decide_whether_writes_can_run_together() {
+        let call = |name: &str, input: Value| ToolCall { tool_call_id: "1".into(), tool_name: name.into(), input };
+        // Only single-file writers are groupable, and the path comes from the normalized input.
+        assert_eq!(mutation_target(&call("write_file", json!({"path": "a.txt"}))).as_deref(), Some("a.txt"));
+        assert_eq!(mutation_target(&call("edit_file", json!({"filePath": "b.txt", "oldText": "x", "newText": "y"}))).as_deref(), Some("b.txt"));
+        // Shell, patches and anything ambiguous must stay sequential.
+        assert_eq!(mutation_target(&call("bash", json!({"command": "echo hi"}))), None);
+        assert_eq!(mutation_target(&call("apply_patch", json!({"patch": "*** Begin Patch"}))), None);
+        assert_eq!(mutation_target(&call("write_file", json!({}))), None);
+    }
 
     #[test]
     fn previews_and_meta() {

@@ -117,6 +117,62 @@ test('digest writes a corpus even when no run failed', async t => {
   assert.match(overview, /Experience digest/);
 });
 
+test('weak tool calling: fuzzy names and double-encoded arguments still work', async t => {
+  const f = await fixture(t);
+  // A drifting model: tool name is a near-miss and the argument object is a JSON string.
+  const fixturePath = join(f.root, 'stub-weak.json');
+  await writeFile(
+    fixturePath,
+    JSON.stringify({
+      v: 1,
+      turns: [
+        {
+          match: 'weak model',
+          toolCalls: [{ id: 'call-weak-1', name: 'readfile', input: JSON.stringify({ file_path: 'notes.txt' }) }],
+        },
+        { text: ['read it'] },
+      ],
+    }),
+  );
+  await writeFile(join(f.cwd, 'notes.txt'), 'weak-model-note\n');
+
+  const run = await stubCli(f, ['--stub-fixture', fixturePath, '--yes', '-p', 'weak model']).done;
+  assert.equal(run.code, 0, run.stderr);
+  // The repaired call must have been accepted: a near-miss name and a JSON-string argument set
+  // would otherwise fail as "Unknown tool" / "Invalid arguments".
+  assert.doesNotMatch(`${run.stdout}\n${run.stderr}`, /Unknown tool/i);
+  assert.doesNotMatch(`${run.stdout}\n${run.stderr}`, /Invalid arguments/i);
+  assert.doesNotMatch(`${run.stdout}\n${run.stderr}`, /error-text/i);
+});
+
+test('parallel writes to distinct files land, and same-file writes keep their order', async t => {
+  const f = await fixture(t);
+  const distinct = [];
+  for (let i = 0; i < 6; i += 1) distinct.push({ id: `w${i}`, name: 'write_file', input: { path: `f${i}.txt`, content: `x${i}` } });
+  const fixturePath = join(f.root, 'stub-par.json');
+  await writeFile(
+    fixturePath,
+    JSON.stringify({
+      v: 1,
+      turns: [{ match: 'write many', toolCalls: distinct }, { text: ['done'] }],
+    }),
+  );
+  const run = await stubCli(f, ['--stub-fixture', fixturePath, '--yes', '-p', 'write many']).done;
+  assert.equal(run.code, 0, run.stderr);
+  for (let i = 0; i < 6; i += 1) {
+    assert.equal((await readFile(join(f.cwd, `f${i}.txt`), 'utf8')).trim(), `x${i}`);
+  }
+
+  // Same path: the batch must stay sequential, so the last write wins.
+  const same = [];
+  for (let i = 0; i < 6; i += 1) same.push({ id: `s${i}`, name: 'write_file', input: { path: 'same.txt', content: `v${i}` } });
+  const sameFixture = join(f.root, 'stub-same.json');
+  await writeFile(sameFixture, JSON.stringify({ v: 1, turns: [{ match: 'write same', toolCalls: same }, { text: ['done'] }] }));
+  const run2 = await stubCli(f, ['--stub-fixture', sameFixture, '--yes', '-p', 'write same']).done;
+  assert.equal(run2.code, 0, run2.stderr);
+  assert.equal((await readFile(join(f.cwd, 'same.txt'), 'utf8')).trim(), 'v5');
+});
+
 test('editing a component changes the snapshot id', async t => {
   const f = await fixture(t);
   assert.equal((await evolve(f, ['evolve', 'init'])).code, 0);

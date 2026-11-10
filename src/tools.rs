@@ -198,6 +198,138 @@ pub fn format_todos(todos: &[TodoItem]) -> String {
     format!("Todos ({}/{} completed, {} in progress, {} pending):\n{}", count("completed"), todos.len(), count("in_progress"), count("pending"), lines.join("\n"))
 }
 
+/// Repairs argument shapes that weaker models emit, before the harness validates them.
+///
+/// Weak or drifting tool-calling models routinely produce: the whole argument object double
+/// encoded as a JSON string, arguments wrapped in a Markdown fence, `arguments` instead of
+/// `input`, or numbers/booleans where the schema wants strings. None of that is a wrong answer,
+/// so it is repaired instead of failing the turn.
+pub fn repair_tool_input(input: &Value) -> Value {
+    static FENCE: OnceLock<Regex> = OnceLock::new();
+    let fence = FENCE.get_or_init(|| Regex::new(r"(?s)^\s*```(?:json|json5)?\s*(.*?)\s*```\s*$").unwrap());
+
+    // A string payload: strip fences, then try to decode one or two levels of JSON.
+    let mut value = match input {
+        Value::String(raw) => {
+            let trimmed = fence.replace(raw, "$1").to_string();
+            let trimmed = trimmed.trim();
+            match serde_json::from_str::<Value>(trimmed) {
+                Ok(decoded) => decoded,
+                Err(_) => return input.clone(),
+            }
+        }
+        other => other.clone(),
+    };
+    // Double-encoded: {"input":"{\"path\":\"a\"}"} or a JSON string of JSON.
+    for _ in 0..2 {
+        let Value::String(inner) = &value else { break };
+        let trimmed = fence.replace(inner, "$1").to_string();
+        match serde_json::from_str::<Value>(trimmed.trim()) {
+            Ok(decoded) if decoded.is_object() || decoded.is_array() => value = decoded,
+            _ => break,
+        }
+    }
+    let Some(map) = value.as_object() else { return value };
+    let mut obj = map.clone();
+    // `arguments`/`args`/`parameters` are the same thing under different provider conventions.
+    if !obj.contains_key("arguments") && !obj.contains_key("input") {
+        if let Some(inner) = first_of(&obj, &["args", "parameters"]).cloned() {
+            if inner.is_object() {
+                let mut merged = inner.as_object().cloned().unwrap_or_default();
+                for (key, val) in obj.iter() {
+                    if !matches!(key.as_str(), "args" | "parameters") {
+                        merged.entry(key.clone()).or_insert_with(|| val.clone());
+                    }
+                }
+                obj = merged;
+            }
+        }
+    }
+    if let Some(inner) = obj.remove("arguments") {
+        if inner.is_object() {
+            for (key, val) in inner.as_object().unwrap().iter() {
+                obj.entry(key.clone()).or_insert_with(|| val.clone());
+            }
+        }
+    }
+    // Scalar coercion is limited to fields that are textual by contract; typed fields such as
+    // `timeout_ms` must keep their JSON type or the schema stops accepting them.
+    const TEXT_KEYS: [&str; 14] = ["path", "content", "command", "query", "pattern", "text", "message", "target", "topic", "name", "oldText", "newText", "old_string", "new_string"];
+    for (key, val) in obj.iter_mut() {
+        let textual = TEXT_KEYS.contains(&key.as_str()) || key.ends_with("_id") || key.ends_with("_name");
+        if !textual {
+            continue;
+        }
+        match val {
+            Value::Number(number) => *val = Value::String(number.to_string()),
+            Value::Bool(flag) => *val = Value::String(flag.to_string()),
+            Value::Array(items) if items.len() == 1 => {
+                if let Some(Value::String(text)) = items.first() {
+                    *val = Value::String(text.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    Value::Object(obj)
+}
+
+/// Tolerant tool-name matching for models that drift: exact, alias, case/dash-insensitive,
+/// prefix, then a one-edit-distance match. Returns `None` when nothing is close enough, so a
+/// genuinely unknown tool still produces an honest error.
+pub fn closest_tool_name(name: &str, known: impl Iterator<Item = String>) -> Option<String> {
+    let wanted = normalize_token(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut candidates: Vec<(u32, String)> = Vec::new();
+    for candidate in known {
+        let token = normalize_token(&candidate);
+        if token == wanted {
+            return Some(candidate);
+        }
+        if token.starts_with(&wanted) || wanted.starts_with(&token) {
+            candidates.push((1, candidate));
+            continue;
+        }
+        if let Some(distance) = edit_distance_at_most(&wanted, &token, 2) {
+            candidates.push((distance, candidate));
+        }
+    }
+    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    candidates.into_iter().next().map(|(_, name)| name)
+}
+
+fn normalize_token(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase().chars().filter(|ch| ch.is_ascii_alphanumeric()).collect()
+}
+
+/// Bounded Levenshtein: returns `None` when the distance exceeds `limit` (cheap early exit).
+fn edit_distance_at_most(left: &str, right: &str, limit: usize) -> Option<u32> {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    if left.len().abs_diff(right.len()) > limit {
+        return None;
+    }
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = vec![0usize; right.len() + 1];
+    for (i, a) in left.iter().enumerate() {
+        current[0] = i + 1;
+        let mut row_min = current[0];
+        for (j, b) in right.iter().enumerate() {
+            let cost = usize::from(a != b);
+            current[j + 1] = (previous[j] + cost).min(previous[j + 1] + 1).min(current[j] + 1);
+            row_min = row_min.min(current[j + 1]);
+        }
+        if row_min > limit {
+            return None;
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    let distance = previous[right.len()];
+    (distance <= limit).then_some(distance as u32)
+}
+
 pub fn tool_name_alias(name: &str) -> Option<&'static str> {
     Some(match name {
         "read" => "read_file",
@@ -250,6 +382,10 @@ fn items_text(obj: &Map<String, Value>) -> Option<String> {
 
 /// Maps argument shapes used by other harnesses (Codex, Claude Code, OpenCode) to goon's.
 pub fn normalize_tool_input(tool: &str, input: &Value) -> Value {
+    // MCP tools carry an external schema owned by the server: repairing their arguments would
+    // silently defeat that contract, so they are passed through untouched.
+    let input = if tool.starts_with("mcp_") { input.clone() } else { repair_tool_input(input) };
+    let input = &input;
     if let Value::String(s) = input {
         return match tool {
             "delegate_task" | "delegate_edit" => json!({ "tasks": [s] }),
@@ -731,7 +867,13 @@ impl ToolRegistry {
 
     pub fn resolve_tool_name(&self, name: &str) -> String {
         let defs = self.definitions.read().unwrap();
-        normalize_tool_name(name, Some(&|n: &str| defs.contains_key(n)))
+        let normalized = normalize_tool_name(name, Some(&|n: &str| defs.contains_key(n)));
+        if defs.contains_key(&normalized) {
+            return normalized;
+        }
+        // Last resort for drifting models: a near-miss name still reaches the right tool instead
+        // of failing the turn with "unknown tool".
+        closest_tool_name(&normalized, defs.keys().cloned()).unwrap_or(normalized)
     }
 
     fn is_exposed(&self, name: &str, d: &ToolDefinition) -> bool {
@@ -1115,6 +1257,34 @@ mod tests {
             normalize_tool_input("update_plan", &json!({"steps": ["a", {"title": "b", "status": "completed"}]})),
             json!({"plan": [{"step": "a", "status": "pending"}, {"step": "b", "status": "completed"}]})
         );
+    }
+
+    #[test]
+    fn repairs_argument_shapes_weak_models_emit() {
+        // Whole object double-encoded as a JSON string.
+        assert_eq!(normalize_tool_input("read_file", &json!("{\"path\":\"a.txt\"}")), json!({"path": "a.txt"}));
+        // Same, wrapped in a Markdown fence.
+        assert_eq!(normalize_tool_input("read_file", &json!("```json\n{\"file_path\":\"a.txt\"}\n```")), json!({"path": "a.txt"}));
+        // `arguments` envelope (OpenAI-style nesting).
+        assert_eq!(normalize_tool_input("read_file", &json!({"arguments": {"path": "a.txt"}})), json!({"path": "a.txt"}));
+        // Nested `args` object merged into the top level.
+        assert_eq!(normalize_tool_input("read_file", &json!({"args": {"path": "a.txt"}})), json!({"path": "a.txt"}));
+        // Text fields accept numbers, single-element arrays, and booleans.
+        assert_eq!(normalize_tool_input("write_file", &json!({"path": ["a.txt"], "content": 42})), json!({"path": "a.txt", "content": "42"}));
+        // Typed fields keep their JSON type, and MCP tools are never repaired.
+        assert_eq!(normalize_tool_input("wait_agent", &json!({"timeoutMs": 500})), json!({"timeout_ms": 500}));
+        assert_eq!(normalize_tool_input("mcp_local_echo", &json!({"text": 4})), json!({"text": 4}));
+    }
+
+    #[test]
+    fn fuzzy_tool_names_reach_the_right_tool() {
+        let known = || ["read_file", "write_file", "list_files", "search"].iter().map(|name| name.to_string());
+        assert_eq!(closest_tool_name("readfile", known()).as_deref(), Some("read_file"));
+        assert_eq!(closest_tool_name("Read_File", known()).as_deref(), Some("read_file"));
+        assert_eq!(closest_tool_name("read_files", known()).as_deref(), Some("read_file"));
+        assert_eq!(closest_tool_name("wrte_file", known()).as_deref(), Some("write_file"));
+        // Nothing close enough must stay unknown rather than guessing a dangerous tool.
+        assert_eq!(closest_tool_name("deploy_everything_now", known()), None);
     }
 
     #[tokio::test]

@@ -213,8 +213,21 @@ Review $1 theo checklist bảo mật và hiệu năng. Ghi chú thêm: $ARGUMENT
 Chạy bằng `/prompts:review src/app.ts kiểm tra SQL injection`. `$ARGUMENTS` là toàn bộ phần sau
 tên lệnh, `$1`…`$9` là từng từ, `$$` là ký tự `$`.
 
-## Harness, Công cụ & Hoàn tác (Checkpoint / Rewind)
+## Tool calling cho model yếu / không ổn định
 
+Goon chấp nhận nhiều kiểu gọi tool sai lệch thay vì kết thúc lượt bằng lỗi:
+
+- **Tên tool gần đúng**: alias (`read`/`readfile`/`Read_File` → `read_file`), so khớp không phân
+  biệt hoa thường/gạch, prefix, và khoảng cách sửa 1–2 ký tự. Không khớp được thì vẫn báo
+  "Unknown tool" (không đoán tool nguy hiểm).
+- **Tham số lệch dạng**: cả object bị encode 2 lần thành JSON string, bọc trong ```` ```json ````,
+  nằm trong `arguments`/`args`, số/bool/array-1-phần-tử ở field văn bản → được sửa trước khi validate.
+  Field có kiểu (vd `timeout_ms`) giữ nguyên kiểu; tool MCP **không** bị sửa vì schema thuộc server.
+- **Parallel tool calling**: nhiều lệnh đọc chạy song song (tối đa 8). Nhiều lệnh ghi chạy song song
+  (tối đa 4) **chỉ khi cùng tool và path rời nhau**; ghi cùng một file, `apply_patch` nhiều file,
+  hay `bash` vẫn tuần tự để giữ thứ tự và tính đúng.
+
+## Harness, Công cụ & Hoàn tác (Checkpoint / Rewind)
 - **Bộ công cụ tích hợp đầy đủ**:
   - **File & Shell**: `read_file`, `list_files`, `search`, `write_file`, `edit_file`, `apply_patch`, `bash`, `view_image`.
   - **Kế hoạch & Tương tác**: `todo_read`, `todo_write`, `update_plan`, `request_user_input`, `exit_plan_mode`.
