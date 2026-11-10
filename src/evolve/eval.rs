@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 
 use crate::evolve::types::*;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,6 +32,9 @@ pub struct EvalTask {
     pub expect: Option<String>,
     #[serde(default)]
     pub verify: Vec<String>,
+    /// FrontierCode-style grading: blocking criteria must all pass, the rest are weighted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rubric: Option<Rubric>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<Variant>,
     #[serde(default = "default_timeout")]
@@ -40,6 +43,79 @@ pub struct EvalTask {
 
 fn default_timeout() -> u64 {
     DEFAULT_TIMEOUT_MS
+}
+
+/// One graded requirement: a shell check that must exit 0.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Criterion {
+    pub id: String,
+    #[serde(default = "unit_weight")]
+    pub weight: f64,
+    pub command: String,
+}
+
+fn unit_weight() -> f64 {
+    1.0
+}
+
+/// How a task is graded, mirroring FrontierCode's two-tier rubric.
+///
+/// A failing blocker caps the task at zero (like a change-requested review); otherwise the score
+/// is the weighted fraction of passing criteria. Without a rubric the task is pass/fail on
+/// `expect` + `verify`, which is what the other eval modes use.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Rubric {
+    /// Requirements that are so central that failing one means "not mergeable".
+    #[serde(default)]
+    pub blockers: Vec<Criterion>,
+    /// Quality requirements that contribute weight to the final score.
+    #[serde(default)]
+    pub criteria: Vec<Criterion>,
+}
+
+impl Rubric {
+    pub fn is_empty(&self) -> bool {
+        self.blockers.is_empty() && self.criteria.is_empty()
+    }
+
+    pub fn validate(&self, task_id: &str) -> Result<()> {
+        let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for criterion in self.blockers.iter().chain(self.criteria.iter()) {
+            if criterion.id.trim().is_empty() {
+                bail!("task `{task_id}` has a rubric entry with an empty id");
+            }
+            if !seen.insert(criterion.id.as_str()) {
+                bail!("task `{task_id}` has a duplicate rubric id `{}`", criterion.id);
+            }
+            if criterion.command.trim().is_empty() {
+                bail!("task `{task_id}` rubric `{}` has an empty command", criterion.id);
+            }
+            if !criterion.weight.is_finite() || criterion.weight < 0.0 {
+                bail!("task `{task_id}` rubric `{}` has an invalid weight", criterion.id);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn total_weight(&self) -> f64 {
+        self.criteria.iter().map(|criterion| criterion.weight).sum()
+    }
+}
+
+/// Outcome of grading one task against its rubric.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RubricScore {
+    /// Weighted fraction in `0..=1`; `0.0` when any blocker failed.
+    pub score: f64,
+    pub failed_blockers: Vec<String>,
+    pub passed_criteria: Vec<String>,
+    pub failed_criteria: Vec<String>,
+}
+
+impl RubricScore {
+    pub fn passed(&self) -> bool {
+        self.failed_blockers.is_empty()
+    }
 }
 
 /// A split's worth of tasks.
@@ -110,6 +186,9 @@ pub fn load(path: &Path, split: Split) -> Result<EvalSet> {
         }
         if task.prompt.trim().is_empty() {
             return Err(anyhow!("{}: task `{id}` has an empty prompt", path.display()));
+        }
+        if let Some(rubric) = &task.rubric {
+            rubric.validate(id)?;
         }
     }
     Ok(EvalSet { split: selected, tasks })
@@ -211,6 +290,93 @@ struct Judgement {
     detail: Option<String>,
     tokens: u64,
     session_id: Option<String>,
+    /// Weighted rubric score in `0..=1` when the task carries a rubric.
+    score: Option<f64>,
+}
+
+/// Fair-internet-use detection, mirroring FrontierCode's second safeguard.
+///
+/// A run is flagged when its shell commands touch a solution-bearing source: an upstream commit
+/// or PR diff, a raw file from the project's own repository, or a package install of the project
+/// under test. Documentation lookups and search queries are deliberately allowed, because the
+/// benchmark is about engineering work, not about pretending the internet does not exist.
+pub fn unfair_internet_use(command: &str, project: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let project = project.trim().to_ascii_lowercase();
+    let reads_diff = lower.contains("/pull/")
+        || lower.contains("refs/pull/")
+        || lower.contains("/commit/")
+        || lower.contains("patch-diff")
+        || lower.contains(".diff?")
+        || lower.ends_with(".diff")
+        || lower.contains(".diff ")
+        || lower.contains(".patch")
+        || (lower.contains("gh pr") && lower.contains("checkout"));
+    let on_github = lower.contains("github.com") || lower.contains("gitlab.com") || lower.contains("raw.githubusercontent");
+    let pulls_solution = project.len() >= 3
+        && lower.contains(&project)
+        && (lower.contains("git clone") || lower.contains("npm install") || lower.contains("pip install") || lower.contains("cargo add") || lower.contains("yarn add"));
+    // A pull-request ref or a diff URL is solution-bearing on its own: `refs/pull/9/head` needs
+    // no host name to be the upstream fix.
+    let decisive = lower.contains("refs/pull/") || (lower.contains("gh pr") && lower.contains("checkout"));
+    (reads_diff && (on_github || lower.contains("http") || lower.contains("url"))) || decisive || pulls_solution
+}
+
+/// Scans the child's own event log for a flagged shell command.
+fn scan_fair_use(data_base: Option<&Path>, before: &std::collections::BTreeSet<String>, project: &str) -> Option<String> {
+    let dir = match data_base {
+        Some(base) => base.join("goon").join("sessions"),
+        None => crate::config::data_dir().join("sessions"),
+    };
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".events.jsonl") || before.contains(&name) {
+            continue;
+        }
+        let Ok(log) = crate::eventlog::read_event_log(&entry.path()) else { continue };
+        for envelope in &log.envelopes {
+            let event = &envelope.event;
+            if event.get("type").and_then(serde_json::Value::as_str) != Some("tool") {
+                continue;
+            }
+            if event.get("name").and_then(serde_json::Value::as_str) != Some("bash") {
+                continue;
+            }
+            let summary = event.get("meta").and_then(|meta| meta.get("summary")).and_then(serde_json::Value::as_str).unwrap_or("");
+            if unfair_internet_use(summary, project) {
+                return Some(summary.to_string());
+            }
+        }
+    }
+    None
+}
+async fn grade(rubric: &Rubric, root: &Path, timeout_ms: u64) -> Result<RubricScore> {
+    let mut score = RubricScore::default();
+    for blocker in &rubric.blockers {
+        if !verify_one(&blocker.command, root, timeout_ms).await? {
+            score.failed_blockers.push(blocker.id.clone());
+        }
+    }
+    let total = rubric.total_weight();
+    let mut earned = 0.0;
+    for criterion in &rubric.criteria {
+        if verify_one(&criterion.command, root, timeout_ms).await? {
+            earned += criterion.weight;
+            score.passed_criteria.push(criterion.id.clone());
+        } else {
+            score.failed_criteria.push(criterion.id.clone());
+        }
+    }
+    // A blocker failure is a change-requested review: the weighted score does not matter.
+    score.score = if !score.failed_blockers.is_empty() {
+        0.0
+    } else if total > 0.0 {
+        (earned / total).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    Ok(score)
 }
 
 async fn run_task(task: &EvalTask, opts: &EvalOptions) -> TaskOutcome {
@@ -223,7 +389,8 @@ async fn run_task(task: &EvalTask, opts: &EvalOptions) -> TaskOutcome {
         Ok(judgement) => TaskOutcome {
             task_id: task.id.clone(),
             passed: judgement.passed,
-            score: if judgement.passed { 1.0 } else { 0.0 },
+            // A rubric score is the graded value; pass/fail tasks keep the 0/1 convention.
+            score: judgement.score.unwrap_or(if judgement.passed { 1.0 } else { 0.0 }),
             tokens: judgement.tokens,
             duration_ms,
             failure: judgement.failure,
@@ -285,9 +452,19 @@ async fn judge_task(task: &EvalTask, opts: &EvalOptions, root: &Path) -> Result<
     };
     // Cost accounting: the child's own event log is the only place its usage lands.
     let (tokens, session_id) = session_usage(opts.data_dir.as_deref(), &sessions_before, task.id.trim());
+    // FrontierCode safeguard 2: a run that consulted a solution-bearing source scores zero.
+    let flagged = scan_fair_use(opts.data_dir.as_deref(), &sessions_before, &task.id);
 
     let verify_ok = if timed_out { false } else { verify_all(&task.verify, root, timeout_ms).await? };
-    let ok = passed(exit_ok, task.expect.as_deref(), &stdout, verify_ok);
+    // A rubric replaces the pass/fail verdict with a weighted score (blockers cap it at zero).
+    let graded = match &task.rubric {
+        Some(rubric) if !rubric.is_empty() && !timed_out => Some(grade(rubric, root, timeout_ms).await?),
+        _ => None,
+    };
+    let ok = match &graded {
+        Some(score) => score.passed() && (verify_ok || task.verify.is_empty()),
+        None => passed(exit_ok, task.expect.as_deref(), &stdout, verify_ok),
+    };
     let failure = if ok {
         None
     } else if timed_out {
@@ -303,7 +480,18 @@ async fn judge_task(task: &EvalTask, opts: &EvalOptions, root: &Path) -> Result<
     } else {
         detail_of(&stderr, &stdout)
     };
-    Ok(Judgement { passed: ok, failure, detail, tokens, session_id })
+    if let Some(command) = flagged {
+        // Zero the run: a valid answer obtained from the upstream fix is not a solve.
+        return Ok(Judgement {
+            passed: false,
+            failure: Some(FailureSignal::Other("unfair_internet_use".to_string())),
+            detail: Some(format!("flagged: consulted a solution-bearing source ({command})")),
+            tokens,
+            session_id,
+            score: Some(0.0),
+        });
+    }
+    Ok(Judgement { passed: ok, failure, detail, tokens, session_id, score: graded.as_ref().map(|score| score.score) })
 }
 
 /// Session log file names present before a child runs (`{data}/goon/sessions/*.events.jsonl`).
@@ -494,7 +682,7 @@ mod tests {
     }
 
     fn task(id: &str, prompt: &str) -> EvalTask {
-        EvalTask { id: id.into(), prompt: prompt.into(), files: BTreeMap::new(), expect: None, verify: vec![], variant: None, timeout_ms: 30_000 }
+        EvalTask { id: id.into(), prompt: prompt.into(), files: BTreeMap::new(), expect: None, verify: vec![], rubric: None, variant: None, timeout_ms: 30_000 }
     }
 
     #[test]
@@ -670,6 +858,87 @@ mod tests {
         assert_eq!(effective_timeout(&eval_task, &short_cap), 240_000);
         eval_task.timeout_ms = 0;
         assert_eq!(effective_timeout(&eval_task, &short_cap), 60_000);
+    }
+
+    #[test]
+    fn rubric_validates_ids_commands_and_weights() {
+        let ok = Rubric { blockers: vec![Criterion { id: "b".into(), weight: 1.0, command: "true".into() }], criteria: vec![Criterion { id: "c".into(), weight: 2.0, command: "true".into() }] };
+        assert!(ok.validate("t").is_ok());
+        assert_eq!(ok.total_weight(), 2.0);
+
+        let duplicate =
+            Rubric { criteria: vec![Criterion { id: "c".into(), weight: 1.0, command: "true".into() }, Criterion { id: "c".into(), weight: 1.0, command: "true".into() }], blockers: vec![] };
+        assert!(duplicate.validate("t").is_err());
+        let empty_command = Rubric { blockers: vec![], criteria: vec![Criterion { id: "c".into(), weight: 1.0, command: "  ".into() }] };
+        assert!(empty_command.validate("t").is_err());
+        let bad_weight = Rubric { blockers: vec![], criteria: vec![Criterion { id: "c".into(), weight: -1.0, command: "true".into() }] };
+        assert!(bad_weight.validate("t").is_err());
+    }
+
+    #[test]
+    fn fair_use_allows_documentation_and_flags_solution_sources() {
+        // Allowed: reading docs, searching for an error message.
+        assert!(!unfair_internet_use("curl https://developer.mozilla.org/en-US/docs/Web/JavaScript", "msw"));
+        assert!(!unfair_internet_use("npm view msw version", "msw"));
+        // Flagged: opening the upstream PR diff, fetching a patch, installing the project under test.
+        assert!(unfair_internet_use("curl https://github.com/mswjs/msw/pull/1234.diff", "msw"));
+        assert!(unfair_internet_use("git fetch origin refs/pull/9/head", "msw"));
+        assert!(unfair_internet_use("npm install msw@latest", "msw"));
+        assert!(unfair_internet_use("pip install requests==2.0", "requests"));
+    }
+
+    #[test]
+    fn mean_score_equals_pass_rate_for_pass_fail_sets() {
+        let outcomes = vec![
+            TaskOutcome { task_id: "a".into(), passed: true, score: 1.0, tokens: 0, duration_ms: 0, failure: None, session_id: None, detail: None },
+            TaskOutcome { task_id: "b".into(), passed: false, score: 0.0, tokens: 0, duration_ms: 0, failure: None, session_id: None, detail: None },
+        ];
+        let run = RunSummary::new(Split::Train, None, None, outcomes);
+        assert!((run.pass_rate() - run.mean_score()).abs() < 1e-9);
+        // A graded set separates them: pass/fail can be 1/1 while the score is lower.
+        let graded = vec![
+            TaskOutcome { task_id: "a".into(), passed: true, score: 1.0, tokens: 0, duration_ms: 0, failure: None, session_id: None, detail: None },
+            TaskOutcome { task_id: "b".into(), passed: true, score: 0.5, tokens: 0, duration_ms: 0, failure: None, session_id: None, detail: None },
+        ];
+        let run = RunSummary::new(Split::Train, None, None, graded);
+        assert_eq!(run.pass_rate(), 1.0);
+        assert!((run.mean_score() - 0.75).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn rubric_grades_weighted_criteria_and_blockers_cap_the_score() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let script = write_stub(dir.path(), STUB_NAME, OK_SCRIPT);
+        let mut eval_task = task("graded", "report the task id");
+        eval_task.rubric = Some(Rubric {
+            blockers: vec![Criterion { id: "blocker".into(), weight: 1.0, command: "echo ok".into() }],
+            criteria: vec![Criterion { id: "cheap".into(), weight: 1.0, command: "echo ok".into() }, Criterion { id: "expensive".into(), weight: 3.0, command: FAIL_VERIFY.into() }],
+        });
+        let set = EvalSet { split: Split::Train, tasks: vec![eval_task.clone()] };
+        let summary = run(&set, &options(dir.path(), script.clone())).await.expect("run");
+        let outcome = &summary.outcomes[0];
+        assert!(outcome.passed, "blocker passed, so the task is mergeable");
+        assert!((outcome.score - 0.25).abs() < 1e-9, "1 of 4 weight passed, got {}", outcome.score);
+        assert!((summary.mean_score() - 0.25).abs() < 1e-9);
+
+        // A failing blocker caps the score at zero even when every criterion passes.
+        eval_task.rubric = Some(Rubric {
+            blockers: vec![Criterion { id: "blocker".into(), weight: 1.0, command: FAIL_VERIFY.into() }],
+            criteria: vec![Criterion { id: "cheap".into(), weight: 1.0, command: "echo ok".into() }],
+        });
+        let set = EvalSet { split: Split::Train, tasks: vec![eval_task] };
+        let summary = run(&set, &options(dir.path(), script)).await.expect("run");
+        assert!(!summary.outcomes[0].passed);
+        assert_eq!(summary.outcomes[0].score, 0.0);
+    }
+
+    #[test]
+    fn load_rejects_invalid_rubrics() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, r#"{"split":"train","tasks":[{"id":"t","prompt":"p","rubric":{"blockers":[{"id":"a","command":"true"},{"id":"a","command":"true"}]}}]}"#).unwrap();
+        let err = load(&path, Split::Train).expect_err("duplicate rubric id");
+        assert!(format!("{err:#}").contains("duplicate rubric id"));
     }
 
     #[tokio::test]

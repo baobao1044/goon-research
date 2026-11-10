@@ -196,7 +196,31 @@ outcomes for fewer tokens), `neutral`, `inconclusive`. A measured example from a
 the "manifest preflight" patch left success at 100% and cut 3,652 tokens/task, so it reports
 `neutral_but_cheaper` with `U = n/a` — which is exactly the case a pass-rate-only gate hides.
 
-## 10. Where the measurements come from (and their limits)
+## 10. Mergeability grading (FrontierCode-style)
+
+Cognition's FrontierCode is a **closed** benchmark: the tasks and the grader live on their side,
+and the published material is methodology plus leaderboard, not a runnable suite. What this repo
+can do is implement the same *grading shape* and run it on tasks we author ourselves — clearly
+labelled as ours, never as FrontierCode scores.
+
+Two pieces, both in `eval.rs`:
+
+- **Rubric**: a task may carry `blockers` and weighted `criteria`, each a shell check. A failing
+  blocker caps the task at 0 (a change-requested review); otherwise the score is the weighted
+  fraction of passing criteria. Tasks without a rubric keep the ordinary pass/fail verdict, so the
+  other eval modes are unchanged. `RunSummary::mean_score()` is the aggregate; for pass/fail sets
+  it equals the pass rate.
+- **Fair internet use**: after a run, the child's own event log is scanned for shell commands that
+  touch solution-bearing sources (a `/pull/` or `/commit/` diff, a `.patch`/`.diff` fetch, or
+  installing the project under test). A flagged run scores zero and reports
+  `unfair_internet_use`; documentation lookups and search are deliberately allowed.
+
+Measured example (3 authored tasks, real model): pass rate 3/3 but mean score **0.905**, because
+the third task passed its blocker while skipping two weighted criteria (generator cleanup,
+regression test) and landed at 0.714. That gap between "the tests pass" and "the maintainer would
+merge this" is the whole point of the benchmark, and a pass-rate-only harness cannot see it.
+
+## 11. Where the measurements come from (and their limits)
 
 - Train split drives diagnosis and the round decision; dev split gates durability; test split is
   read at most once (AutoSaddler discipline).
@@ -209,7 +233,7 @@ Honest limits compared with the papers: eval sets here are small (default
 `max_tasks = 10`), rounds are manual, and there is no RL/training bridge. Expect a handful of
 tasks and one round per invocation, not 89 tasks × 10 rounds versus Terminal-Bench.
 
-## 11. Commands
+## 12. Commands
 
 ```bash
 goon evolve init                     # seed .goon/harness + eval/tasks.json
@@ -232,7 +256,7 @@ goon --jit -p '...'                  # enable JIT selection for this run
 State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manifests/<round>.json`,
 `runs/<id>.json`, `digest/`, `evodag.jsonl`, `solved.json`, `jit.jsonl`.
 
-## 12. Failure modes handled explicitly
+## 13. Failure modes handled explicitly
 
 | Failure | Handling |
 |---|---|
@@ -249,7 +273,7 @@ State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manif
 | Run loops forever making tool calls | `policy/loop.json maxSteps` stops it |
 | Bundle declares a tool with hostile arguments | argument charset allowlist refuses it |
 
-## 13. The 29 design patterns (paper 4) and where this repo stands
+## 14. The 29 design patterns (paper 4) and where this repo stands
 
 `✅` implemented · `🟡` partial · `❌` not implemented · `—` out of scope
 
@@ -289,7 +313,7 @@ Count: ✅ 10 · 🟡 12 · ❌ 6 · — 1. The gaps are deliberate: this is a s
 at Termux, and every pattern skipped here (session trees, client/server split, cache fanout,
 neural code RAG) is a large subsystem whose cost would land on every user.
 
-## 14. Test coverage
+## 15. Test coverage
 
 `cargo test --lib evolve` — 87 tests over `bundle`, `store`, `digest`, `patch`, `manifest`,
 `profile`, `jit`, `eval`, `pipeline`, `attribution`, `types`, plus CLI-level coverage in `tests/evolve.test.mjs`

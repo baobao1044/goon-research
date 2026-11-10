@@ -386,12 +386,13 @@ async fn eval_cmd(values: &Parsed, config: &Config) -> Result<()> {
         print_json(&json!(run));
     } else {
         stdout_write(&format!(
-            "split {}  bundle {}  {}/{} ({:.1}%)  tokens {}\n",
+            "split {}  bundle {}  {}/{} ({:.1}%)  score {:.3}  tokens {}\n",
             split.as_str(),
             bundle_id.unwrap_or_else(|| "-".into()),
             run.passed(),
             run.total(),
             run.pass_rate() * 100.0,
+            run.mean_score(),
             run.tokens()
         ));
         for outcome in &run.outcomes {

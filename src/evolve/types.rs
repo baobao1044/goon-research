@@ -489,6 +489,16 @@ impl RunSummary {
         }
     }
 
+    /// Mean per-task score: identical to `pass_rate` for pass/fail sets, and the weighted
+    /// rubric aggregate for graded sets.
+    pub fn mean_score(&self) -> f64 {
+        if self.outcomes.is_empty() {
+            0.0
+        } else {
+            self.outcomes.iter().map(|outcome| outcome.score).sum::<f64>() / self.outcomes.len() as f64
+        }
+    }
+
     pub fn passed_ids(&self) -> std::collections::BTreeSet<String> {
         self.outcomes.iter().filter(|outcome| outcome.passed).map(|outcome| outcome.task_id.clone()).collect()
     }
