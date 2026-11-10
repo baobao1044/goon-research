@@ -215,7 +215,7 @@ pub struct HarnessDeps {
 }
 
 pub const MAX_API_RETRIES: u32 = 3;
-pub const MAX_PARALLEL_READS: usize = 6;
+pub const MAX_PARALLEL_READS: usize = 8;
 const RETRY_BASE_MS: f64 = 250.0;
 const RETRY_MAX_MS: f64 = 8_000.0;
 const RETRY_MAX_AFTER_MS: f64 = 20_000.0;

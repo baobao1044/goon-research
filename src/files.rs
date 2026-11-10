@@ -1149,6 +1149,12 @@ impl WorkspaceFiles {
         }
         let Some(serde_json::Value::String(path_val)) = path_val else { return Ok(None) };
         let file = self.path(&path_val)?;
+        // The preview is cosmetic: diffing a multi-megabyte file would add latency to every edit
+        // for a string nobody reads. The edit itself is untouched.
+        const PREVIEW_MAX_BYTES: u64 = 1_048_576;
+        if std::fs::metadata(&file).map(|meta| meta.len() > PREVIEW_MAX_BYTES).unwrap_or(false) {
+            return Ok(Some(format!("(diff preview skipped: {} is larger than {PREVIEW_MAX_BYTES} bytes)", file.display())));
+        }
         let before = self.text(&file).unwrap_or_default();
         if normalized_tool == "write_file" {
             if let Some(content) = raw.get("content").and_then(|v| v.as_str()) {

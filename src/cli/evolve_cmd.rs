@@ -11,6 +11,7 @@ use crate::evolve::digest::{self, DigestOptions};
 use crate::evolve::engine::{self, EngineOptions, HeuristicProposer, ModelProposer, Proposer};
 use crate::evolve::eval::{self, EvalOptions};
 use crate::evolve::jit::{JitPlanner, MAX_JIT_REPAIRS};
+use crate::evolve::patch;
 use crate::evolve::store::HarnessStore;
 use crate::evolve::types::*;
 use anyhow::{bail, Context, Result};
@@ -56,6 +57,7 @@ pub async fn run(positionals: &[String], values: &Parsed, config: &Config) -> Re
         "revert" | "restore" => revert(values, config),
         "jit" | "plan" => jit_cmd(values, config).await,
         "eval" => eval_cmd(values, config).await,
+        "attribute" | "attrib" => attribute_cmd(values, config).await,
         "help" | "--help" => {
             stdout_write(EVOLVE_HELP);
             Ok(())
@@ -75,6 +77,7 @@ goon evolve — observability-driven harness evolution (off by default)
   goon evolve revert <round|bundle-id>               restore a bundle into .goon/harness
   goon evolve jit -p '<task>' [--run]                plan a harness for one task
   goon evolve eval [--split train|dev|test]          measure the active bundle
+  goon evolve attribute --round N [--trials 2]        ablation study: which patch did what
 
 Bundle stays editable and revertible: one component = one file under .goon/harness/.
 ";
@@ -400,5 +403,81 @@ async fn eval_cmd(values: &Parsed, config: &Config) -> Result<()> {
             ));
         }
     }
+    Ok(())
+}
+
+/// `goon evolve attribute`: controlled ablation of the patches a round would apply.
+///
+/// The proposer runs exactly as in `evolve run`, but nothing is applied to the workspace: every arm
+/// is measured against an in-memory bundle, so the experiment cannot change the harness.
+async fn attribute_cmd(values: &Parsed, config: &Config) -> Result<()> {
+    use crate::evolve::attribution::{self, ExperimentOptions};
+
+    let ws = workspace(values);
+    let store = store(config);
+    store.ensure()?;
+    let round = values.str("round").and_then(|raw| raw.parse::<u32>().ok()).unwrap_or_else(|| (engine::completed_rounds(&store) as u32) + 1);
+    let trials = values.str("trials").and_then(|raw| raw.parse::<u32>().ok()).unwrap_or(2).max(1);
+
+    let files = bundle::load_files(&ws)?;
+    if files.is_empty() {
+        bail!("No bundle in {}: run `goon evolve init` first.", crate::evolve::bundle_dir(&ws).display());
+    }
+    let base = bundle::snapshot(&store, &files, None, round.saturating_sub(1), variant_arg(values))?;
+
+    // Reuse the round's evidence so the patches under test are the ones a real round would apply.
+    let sessions = digest::sessions_dir_for(&config::data_dir());
+    let digest_opts = DigestOptions { max_sessions: 40, max_tasks: 20, max_tokens: 6000 };
+    let (mut corpus, digests) = digest::digest_sessions(&sessions, &digest_opts).unwrap_or((EvidenceCorpus::empty(), vec![]));
+    corpus.bundle = Some(base.id.clone());
+    let rule = values.str("rule");
+    let ctx = engine::ProposeContext { corpus: &corpus, digests: &digests, files: &files, bundle: &base, round, max_rounds: config.evolve.rounds.max(round), rule: rule.as_deref() };
+    let proposer: Box<dyn engine::Proposer> = if values.flag("model-proposer") {
+        let model = crate::provider::create_model(&config::resolve_runtime(config, &ws)?, None)?;
+        Box::new(engine::ModelProposer { model, system: "You are a harness engineer. Emit only JSON patches that follow the documented edit language.".into(), max_output_tokens: 1800 })
+    } else {
+        Box::new(engine::HeuristicProposer::new(3))
+    };
+    let proposed = proposer.propose(&ctx).await?;
+    if proposed.is_empty() {
+        stdout_write("No actionable evidence: nothing to attribute. Run more tasks or `goon evolve digest` first.\n");
+        return Ok(());
+    }
+    let order = patch::phased(&proposed, round, config.evolve.rounds.max(round), config.evolve.phased_patches);
+    let mut seen: Vec<String> = Vec::new();
+    let patches: Vec<patch::TargetedPatch> = order
+        .iter()
+        .filter_map(|index| proposed.get(*index))
+        .filter(|item| {
+            let key = format!("{:?}|{:?}", item.kind, item.ops);
+            if seen.contains(&key) {
+                false
+            } else {
+                seen.push(key);
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    let opts = ExperimentOptions {
+        round,
+        trials,
+        eval_path: eval_path(values, config),
+        dev_path: values.str("dev-tasks").map(PathBuf::from),
+        max_tasks: values.str("max-tasks").and_then(|raw| raw.parse().ok()).unwrap_or(config.evolve.max_tasks.max(1)),
+        concurrency: 3,
+        retries: 1,
+        goon_bin: values.str("goon-bin").map(PathBuf::from).or_else(|| std::env::current_exe().ok()).unwrap_or_else(|| PathBuf::from("goon")),
+        stub: values.flag("stub") || config.stub,
+        data_dir: Some(config::data_base()),
+    };
+    let report = attribution::run(&store, &ws, &files, &patches, &opts).await.context("attribution experiment failed")?;
+    if values.flag("json") {
+        print_json(&json!(report));
+        return Ok(());
+    }
+    stdout_write(&attribution::render(&report));
+    stdout_write(&format!("\nwritten to {}\n", store.attribution_dir().join(format!("round-{round:03}.json")).display()));
     Ok(())
 }

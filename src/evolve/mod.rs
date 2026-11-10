@@ -8,6 +8,7 @@
 //! The subsystem is off by default (`EvolveConfig::enabled = false`) and never runs unless the
 //! caller passes `--evolve` or invokes `goon evolve ...`.
 
+pub mod attribution;
 pub mod bundle;
 pub mod digest;
 pub mod engine;

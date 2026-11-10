@@ -166,7 +166,37 @@ are comparable.
 - Each outcome carries the child's session id and its real token total, read from the child's own
   event log — so a round reports what it cost, not zero.
 
-## 9. Where the measurements come from (and their limits)
+## 9. Causal attribution (which patch caused what)
+
+A round applies several patches at once, so a single before/after measurement cannot say which
+one did anything. `goon evolve attribute` runs the controlled experiment instead, without ever
+touching the workspace bundle (every arm is measured against an in-memory copy):
+
+| Arm | What it isolates |
+|---|---|
+| `baseline` | the control: same bundle, no patches |
+| `patch-N` | one patch alone (individual ablation) |
+| `combined` | all patches together (only when there is more than one) |
+
+Each arm runs `--trials` times (default 2; one trial cannot separate an effect from model noise,
+so every effect is reported `inconclusive`). The report records the task-set and dev-set hashes
+plus the model id, because two experiments are only comparable when those match.
+
+Three metrics the round gate does not express:
+
+- **Success per 1K tokens** — `E = successful / tokens * 1000` over every arm of the experiment.
+- **Patch utility** — `U = Δsuccess / Δcost`, where `Δcost` is tokens per task. When the patch
+  *saves* cost (`Δcost < 0`) or changes nothing (`Δcost == 0`), `U` is reported as `n/a` rather
+  than a negative or infinite ratio; with no success change `U = 0`.
+- **Generalization gap** — `G = P_train - P_dev` for the measured arm; positive means the effect
+  only holds on the split that drove the edit.
+
+Per-patch verdicts: `helpful`, `helpful_but_costly`, `harmful`, `neutral_but_cheaper` (same
+outcomes for fewer tokens), `neutral`, `inconclusive`. A measured example from a real run:
+the "manifest preflight" patch left success at 100% and cut 3,652 tokens/task, so it reports
+`neutral_but_cheaper` with `U = n/a` — which is exactly the case a pass-rate-only gate hides.
+
+## 10. Where the measurements come from (and their limits)
 
 - Train split drives diagnosis and the round decision; dev split gates durability; test split is
   read at most once (AutoSaddler discipline).
@@ -179,7 +209,7 @@ Honest limits compared with the papers: eval sets here are small (default
 `max_tasks = 10`), rounds are manual, and there is no RL/training bridge. Expect a handful of
 tasks and one round per invocation, not 89 tasks × 10 rounds versus Terminal-Bench.
 
-## 10. Commands
+## 11. Commands
 
 ```bash
 goon evolve init                     # seed .goon/harness + eval/tasks.json
@@ -192,6 +222,8 @@ goon evolve log                      # manifests: prediction vs verdict
 goon evolve revert 1                 # restore the bundle round 1 started from
 goon evolve jit -p 'fix the test'    # task-adaptive harness plan (+ --run)
 goon evolve eval --split dev         # measure the current bundle
+goon evolve attribute --round N      # ablation: control, each patch alone, combined
+goon evolve attribute --trials 3 --model-proposer   # same, model-proposed patches
 
 goon --bundle <id|path> -p '...'     # apply a bundle to a normal session
 goon --jit -p '...'                  # enable JIT selection for this run
@@ -200,7 +232,7 @@ goon --jit -p '...'                  # enable JIT selection for this run
 State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manifests/<round>.json`,
 `runs/<id>.json`, `digest/`, `evodag.jsonl`, `solved.json`, `jit.jsonl`.
 
-## 11. Failure modes handled explicitly
+## 12. Failure modes handled explicitly
 
 | Failure | Handling |
 |---|---|
@@ -217,7 +249,7 @@ State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manif
 | Run loops forever making tool calls | `policy/loop.json maxSteps` stops it |
 | Bundle declares a tool with hostile arguments | argument charset allowlist refuses it |
 
-## 12. The 29 design patterns (paper 4) and where this repo stands
+## 13. The 29 design patterns (paper 4) and where this repo stands
 
 `✅` implemented · `🟡` partial · `❌` not implemented · `—` out of scope
 
@@ -257,10 +289,10 @@ Count: ✅ 10 · 🟡 12 · ❌ 6 · — 1. The gaps are deliberate: this is a s
 at Termux, and every pattern skipped here (session trees, client/server split, cache fanout,
 neural code RAG) is a large subsystem whose cost would land on every user.
 
-## 13. Test coverage
+## 14. Test coverage
 
-`cargo test --lib evolve` — 81 tests over `bundle`, `store`, `digest`, `patch`, `manifest`,
-`profile`, `jit`, `eval`, `pipeline`, `types`, plus CLI-level coverage in `tests/evolve.test.mjs`
+`cargo test --lib evolve` — 87 tests over `bundle`, `store`, `digest`, `patch`, `manifest`,
+`profile`, `jit`, `eval`, `pipeline`, `attribution`, `types`, plus CLI-level coverage in `tests/evolve.test.mjs`
 (11 tests: seeding, status, digest, unmeasured-round rejection, JIT planning, revert, bundle
 application with a `harness` event, snapshot identity, a bundle-declared tool that really runs,
 `maxSteps` enforcement, and the attribution gate).

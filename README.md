@@ -423,6 +423,12 @@ Khi một bundle đang được áp, harness có thêm 4 lớp điều khiển b
   được retry 1 lần, còn câu trả lời sai thì không.
 - **Cổng hiệu quả**: không fix được task nào → reject; pass rate giữ nguyên mà token tăng >10% →
   reject; round không có bằng chứng → reject (không bịa patch rỗng).
+- **`goon evolve attribute`** — lớp **causal attribution**: chạy baseline (không patch), từng patch
+  riêng (ablation), và tổ hợp, mỗi arm `--trials` lần (mặc định 2), cùng model/task/timeout; không
+  sửa workspace. Báo 3 metric: **success per 1K tokens**, **patch utility** `Δsuccess/Δcost` (báo
+  `n/a` khi cost giảm hoặc bằng 0), **generalization gap** `P_train - P_dev`; kèm verdict per patch
+  (`helpful`, `helpful_but_costly`, `harmful`, `neutral_but_cheaper`, `neutral`, `inconclusive`).
+  Report lưu ở `{data_dir}/harness/attribution/round-NNN.json`.
 
 Cổng chấp nhận (fail-closed): không có task nào được đo → **reject**; pass rate giảm → reject;
 mất task đã từng giải → reject; dev giảm → reject (khi bật). Bundle bị từ chối không ghi vào
