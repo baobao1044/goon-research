@@ -6,7 +6,7 @@
 use crate::evolve::types::*;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// AutoSaddler patch taxonomy (9 subtypes).
@@ -123,6 +123,8 @@ pub enum PatchAction {
     AddSkill,
     /// Remove `skills/<name>.md`.
     RemoveSkill,
+    /// Append a tool declaration to `tools/registry.json` (a real, callable capability).
+    AddTool,
 }
 
 impl PatchAction {
@@ -134,6 +136,7 @@ impl PatchAction {
             PatchAction::SetParam => "set_param",
             PatchAction::AddSkill => "add_skill",
             PatchAction::RemoveSkill => "remove_skill",
+            PatchAction::AddTool => "add_tool",
         }
     }
 
@@ -146,6 +149,7 @@ impl PatchAction {
             "set_param" => PatchAction::SetParam,
             "add_skill" => PatchAction::AddSkill,
             "remove_skill" => PatchAction::RemoveSkill,
+            "add_tool" | "new_tool" | "register_tool" => PatchAction::AddTool,
             _ => return None,
         })
     }
@@ -475,6 +479,7 @@ fn apply_op(files: &mut BTreeMap<String, String>, op: &PatchOp, scope: &EditScop
     match op.action {
         PatchAction::AddSkill => add_skill(files, op, scope),
         PatchAction::RemoveSkill => remove_skill(files, op, scope),
+        PatchAction::AddTool => add_tool(files, op, scope),
         PatchAction::SetParam => set_param(files, op, scope),
         PatchAction::AppendSection | PatchAction::ReplaceBlock | PatchAction::InsertBullet => {
             let key = component_key(files, &op.component, scope)?;
@@ -608,6 +613,51 @@ fn remove_skill(files: &mut BTreeMap<String, String>, op: &PatchOp, scope: &Edit
     let key = if files.contains_key(&rel) { rel.clone() } else { format!("{BUNDLE_DIR}/{rel}") };
     let before = files.remove(&key).map(|body| body.len()).ok_or_else(|| anyhow!("skill not found: {rel}"))?;
     Ok((key, before, 0))
+}
+
+/// Appends a tool declaration to `tools/registry.json`, making a real callable tool.
+///
+/// `content` is the JSON object for one entry: `{"name","description","command","args"?,
+/// "parameters"?,"readOnly"?,"network"?}`. The command template may only be extended with
+/// argument placeholders; the harness refuses unsafe argument values at call time.
+fn add_tool(files: &mut BTreeMap<String, String>, op: &PatchOp, scope: &EditScope) -> Result<(String, usize, usize)> {
+    let rel = crate::evolve::types::TOOL_REGISTRY_PATH;
+    scope.check(rel)?;
+    let entry: Value = serde_json::from_str(op.content.trim()).map_err(|error| anyhow!("add_tool content is not JSON: {error}"))?;
+    let name = entry.get("name").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    let command = entry.get("command").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    if name.is_empty() {
+        bail!("add_tool requires a name");
+    }
+    if command.is_empty() {
+        bail!("add_tool requires a command template");
+    }
+    let body = files.get(rel).cloned().unwrap_or_else(|| "{\n  \"version\": 1,\n  \"tools\": []\n}\n".to_string());
+    let mut registry: Value = serde_json::from_str(&body).unwrap_or_else(|_| json!({ "version": 1, "tools": [] }));
+    if !registry.is_object() {
+        registry = json!({ "version": 1, "tools": [] });
+    }
+    let mut list: Vec<Value> = match registry.get_mut("tools") {
+        Some(Value::Array(items)) => std::mem::take(items),
+        Some(slot) => {
+            *slot = json!([]);
+            Vec::new()
+        }
+        None => Vec::new(),
+    };
+    if list.iter().any(|tool| tool.get("name").and_then(Value::as_str) == Some(name)) {
+        bail!("tool already exists: {name}");
+    }
+    list.push(entry);
+    if let Some(map) = registry.as_object_mut() {
+        map.insert("tools".to_string(), Value::Array(list));
+    }
+    let mut text = serde_json::to_string_pretty(&registry)?;
+    text.push('\n');
+    let before = body.len();
+    let after = text.len();
+    files.insert(rel.to_string(), text);
+    Ok((rel.to_string(), before, after))
 }
 
 /// `skills/<name>.md` for an add/remove skill op.
@@ -818,13 +868,7 @@ fn default_kind() -> PatchKind {
 
 fn patch_from_value(value: &Value) -> Result<Option<TargetedPatch>> {
     let map = value.as_object().ok_or_else(|| anyhow!("not a JSON object"))?;
-    let kind = match map.get("kind").and_then(Value::as_str).map(str::trim).filter(|raw| !raw.is_empty()) {
-        Some(raw) => match PatchKind::parse(raw) {
-            Some(kind) => kind,
-            None => return Ok(None),
-        },
-        None => default_kind(),
-    };
+    let declared = map.get("kind").and_then(Value::as_str).map(str::trim).filter(|raw| !raw.is_empty()).and_then(PatchKind::parse);
     let rationale = map.get("rationale").and_then(Value::as_str).or_else(|| map.get("root_cause").and_then(Value::as_str)).unwrap_or("").trim().to_string();
     let evidence = parse_evidence(map.get("evidence"));
     let prediction = map.get("prediction").and_then(|value| serde_json::from_value::<Prediction>(value.clone()).ok()).unwrap_or_default();
@@ -841,7 +885,36 @@ fn patch_from_value(value: &Value) -> Result<Option<TargetedPatch>> {
     if ops.is_empty() {
         return Err(anyhow!("{} unusable op(s), none left", skipped_ops.max(1)));
     }
+    // A model may name a kind outside the vocabulary; the ops still say what it wants to do, so
+    // infer the kind from them instead of dropping an otherwise valid edit.
+    let kind = declared.or_else(|| infer_kind(&ops)).unwrap_or_else(default_kind);
     Ok(Some(TargetedPatch { kind, rationale, evidence, ops, prediction }))
+}
+
+/// Classifies a patch by what its ops actually touch.
+fn infer_kind(ops: &[PatchOp]) -> Option<PatchKind> {
+    let first = ops.first()?;
+    let component = first.component.trim().trim_start_matches("./");
+    let kind = match first.action {
+        PatchAction::AddSkill => PatchKind::SkillAdd,
+        PatchAction::RemoveSkill => PatchKind::SkillMod,
+        PatchAction::AddTool => PatchKind::NewTool,
+        PatchAction::SetParam => match component {
+            crate::evolve::types::CONTEXT_POLICY_PATH => PatchKind::ContextPolicy,
+            crate::evolve::types::JIT_POLICY_PATH => PatchKind::InfraChange,
+            crate::evolve::types::LOOP_POLICY_PATH => PatchKind::LoopLogic,
+            crate::evolve::types::VERIFY_POLICY_PATH => PatchKind::InfraChange,
+            crate::evolve::types::MEMORY_PATH => PatchKind::MemoryPolicy,
+            _ => PatchKind::InfraChange,
+        },
+        PatchAction::AppendSection | PatchAction::ReplaceBlock | PatchAction::InsertBullet => match component {
+            crate::evolve::types::TOOL_GUIDANCE_PATH | crate::evolve::types::TOOL_REGISTRY_PATH => PatchKind::ToolDescFix,
+            crate::evolve::types::MEMORY_PATH => PatchKind::MemoryPolicy,
+            crate::evolve::types::MIDDLEWARE_PATH | crate::evolve::types::SYSTEM_PROMPT_PATH => PatchKind::PromptRuleAdd,
+            _ => PatchKind::PromptRuleAdd,
+        },
+    };
+    Some(kind)
 }
 
 fn parse_op(value: &Value) -> Result<Option<PatchOp>> {
@@ -977,6 +1050,44 @@ mod tests {
     }
 
     #[test]
+    fn unknown_kind_is_inferred_from_the_ops() {
+        let scope = EditScope::default_for_bundle();
+        let mut files = batch();
+        // A model that names a kind outside the vocabulary still gets a usable patch.
+        files.insert(TOOL_REGISTRY_PATH.to_string(), "{\n  \"version\": 1,\n  \"tools\": []\n}\n".to_string());
+        let patches = parse(
+            r#"{"patches":[
+                {"kind":"tweak_the_prompt","rationale":"r","ops":[{"action":"append_section","component":"middleware.md","target":"verify","content":"rule"}]},
+                {"kind":"whatever","ops":[{"action":"add_skill","target":"extra","content":"skill body"}]},
+                {"kind":"nonsense","ops":[{"action":"add_tool","component":"tools/registry.json","content":"{\"name\":\"say\",\"description\":\"d\",\"command\":\"echo {word}\",\"args\":[\"word\"]}"}]}
+            ]}"#,
+        )
+        .expect("patches");
+        assert_eq!(patches.len(), 3);
+        assert_eq!(patches[0].kind, PatchKind::PromptRuleAdd);
+        assert_eq!(patches[1].kind, PatchKind::SkillAdd);
+        assert_eq!(patches[2].kind, PatchKind::NewTool);
+        assert!(patches.iter().all(|patch| patch.class() == PatchClass::Steering || patch.class() == PatchClass::Capability));
+        // The inferred add_tool patch really registers a tool.
+        apply_all(&mut files, &patches[2..], &scope).expect("apply add_tool");
+        let registry: Value = serde_json::from_str(files.get(TOOL_REGISTRY_PATH).unwrap()).unwrap();
+        assert_eq!(registry["tools"][0]["name"], json!("say"));
+    }
+
+    #[test]
+    fn add_tool_rejects_bad_or_duplicate_entries() {
+        let scope = EditScope::default_for_bundle();
+        let mut files = batch();
+        let ok = op(PatchAction::AddTool, TOOL_REGISTRY_PATH, None, "{\"name\":\"a\",\"description\":\"d\",\"command\":\"echo hi\"}");
+        apply(&mut files, &patch(PatchKind::NewTool, vec![ok.clone()]), &scope).expect("first add");
+        let err = apply(&mut files, &patch(PatchKind::NewTool, vec![ok]), &scope).expect_err("duplicate rejected");
+        assert!(format!("{err:#}").contains("already exists"));
+        let missing = op(PatchAction::AddTool, TOOL_REGISTRY_PATH, None, "{\"name\":\"b\"}");
+        let err = apply(&mut files, &patch(PatchKind::NewTool, vec![missing]), &scope).expect_err("command required");
+        assert!(format!("{err:#}").contains("command"));
+    }
+
+    #[test]
     fn set_param_creates_nested_keys_and_types() {
         let scope = EditScope::default_for_bundle();
         let mut files = batch();
@@ -1089,15 +1200,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_skips_unknown_kinds_but_reports_when_nothing_is_left() {
+    fn parse_infers_kind_instead_of_dropping_unknown_names() {
+        // A model naming a kind outside the vocabulary still describes real ops; the ops decide.
         let mixed = r#"[{"kind":"time_travel","ops":[{"action":"append_section","component":"system.md","target":"T","content":"c"}]},
                          {"kind":"prompt_rule_add","ops":[{"action":"append_section","component":"system.md","target":"T","content":"c"}]}]"#;
-        let parsed = parse(mixed).expect("one valid patch survives");
-        assert_eq!(parsed.len(), 1);
+        let parsed = parse(mixed).expect("both patches survive");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].kind, PatchKind::PromptRuleAdd);
+        assert_eq!(parsed[1].kind, PatchKind::PromptRuleAdd);
 
-        let only_unknown = r#"[{"kind":"time_travel","ops":[{"action":"append_section","component":"system.md","target":"T","content":"c"}]}]"#;
-        let err = parse(only_unknown).expect_err("no valid patch");
-        assert!(format!("{err:#}").contains("unknown kind"));
+        // With no usable op there is nothing to infer from, so the patch is reported, not guessed.
+        let only_unknown = r#"[{"kind":"time_travel","ops":[{"action":"time_travel","component":"system.md"}]}]"#;
+        let err = parse(only_unknown).expect_err("no usable op");
+        assert!(format!("{err:#}").contains("unusable op"));
 
         for garbage in ["", "   ", "no json here at all", "{ broken", "[]", "{\"patches\":[]}"] {
             assert!(parse(garbage).is_err(), "garbage input must error, not panic: {garbage:?}");

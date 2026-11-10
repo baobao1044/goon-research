@@ -238,7 +238,28 @@ pub async fn post_json(url: &str, headers: &[(String, String)], body: &Value, ca
     if !status.is_success() {
         return Err(error_from_body(status, response_headers, &text));
     }
-    crate::jsutil::parse_json(&text).map_err(|e| ApiError::new(format!("Invalid JSON response: {e}")))
+    parse_json_response(&text).map_err(|e| ApiError::new(format!("Invalid JSON response: {e}")))
+}
+
+/// Parses a non-streaming response body defensively.
+///
+/// Gateways in the wild answer a `stream: false` request with the right JSON object followed by
+/// leftover SSE frames (`data: [DONE]`) or a second JSON value. Strictly parsing the whole body
+/// turns that into a hard failure, so take the first complete value instead: the leading object is
+/// the payload in every observed case.
+fn parse_json_response(text: &str) -> Result<Value, String> {
+    if let Ok(value) = crate::jsutil::parse_json(text) {
+        return Ok(value);
+    }
+    let trimmed = text.trim_start();
+    // `data: {...}` prefix used by some proxies even on non-streaming requests.
+    let candidate = trimmed.strip_prefix("data:").map(str::trim_start).unwrap_or(trimmed);
+    let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(error)) => Err(error.to_string()),
+        None => Err("empty response body".to_string()),
+    }
 }
 
 /// Request body for a non-streaming call: the streaming body without its stream fields.
@@ -291,6 +312,21 @@ mod tests {
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn non_streaming_body_tolerates_trailing_sse_frames() {
+        // Gateways answer `stream:false` with the object plus a leftover `data: [DONE]` frame.
+        let body = "{\"choices\":[{\"message\":{\"content\":\"OK\"}}]}\ndata: [DONE]\n";
+        let parsed = parse_json_response(body).expect("trailing frame tolerated");
+        assert_eq!(parsed["choices"][0]["message"]["content"], json!("OK"));
+        // A `data:` prefix in front of the payload is also accepted.
+        let prefixed = "data: {\"a\":1}\n\ndata: [DONE]\n";
+        assert_eq!(parse_json_response(prefixed).expect("prefixed payload"), json!({"a": 1}));
+        // A clean body still parses normally.
+        assert_eq!(parse_json_response("{\"a\":2}").expect("clean body"), json!({"a": 2}));
+        assert!(parse_json_response("").is_err());
+        assert!(parse_json_response("not json").is_err());
+    }
 
     #[test]
     fn sse_parser_handles_split_chunks() {

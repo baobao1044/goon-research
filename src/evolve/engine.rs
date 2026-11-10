@@ -196,8 +196,28 @@ fn proposer_prompt(ctx: &ProposeContext<'_>) -> String {
             item.failure.as_ref().map(|signal| signal.as_str().to_string()).unwrap_or_else(|| "-".into())
         ));
     }
+    out.push_str("\nAllowed `kind` values (use one of these exactly):\n");
     out.push_str(
-        "\nReply with JSON only: {\"patches\":[{\"kind\":\"<patch_kind>\",\"rationale\":\"...\",\"evidence\":[{\"session_id\":\"...\",\"task_id\":\"...\",\"signal\":\"...\"}],\"prediction\":{\"expected_fix\":[\"task\"],\"at_risk\":[\"task\"],\"expected_gain_pp\":0.0,\"confidence\":0.0},\"ops\":[{\"action\":\"append_section|replace_block|insert_bullet|set_param|add_skill|remove_skill\",\"component\":\"<component path>\",\"target\":\"<optional marker/heading>\",\"content\":\"<text or JSON value>\"}]}]}\n",
+        "- prompt_rule_add, prompt_rule_mod (middleware.md / system.md prose)\n\
+         - tool_desc_fix (tools/guidance.md or a tools/registry.json entry description)\n\
+         - new_tool (adds a callable tool to tools/registry.json)\n\
+         - context_policy (policy/context.json ratios), memory_policy (memory.md)\n\
+         - infra_change (policy/verify.json), loop_logic (policy/loop.json)\n\
+         - skill_add, skill_mod (skills/<name>.md)\n",
+    );
+    out.push_str("\nAllowed `action` values: append_section, replace_block, insert_bullet, set_param, add_skill, remove_skill, add_tool.\n");
+    out.push_str(
+        "\nRules:\n\
+         - At most 3 patches, at most 8 ops each, and you may only touch the component paths listed above.\n\
+         - append_section needs `target` (a heading) and `content`; replace_block needs the marker id in \
+         `target` and pre-existing `<!-- id:target -->` markers; insert_bullet needs an existing heading.\n\
+         - set_param needs `target` as a dotted key path (for example \"conversation_ratio\") and `content` as the JSON value.\n\
+         - add_tool needs `component` = tools/registry.json and `content` = one JSON object with \
+         name, description, command (may contain {arg} placeholders), args, parameters, and optional readOnly.\n\
+         - Every patch needs `prediction.expected_fix` listing the task ids it claims to fix; at_risk lists tasks it may break.\n",
+    );
+    out.push_str(
+        "\nReply with JSON only: {\"patches\":[{\"kind\":\"<kind from the list>\",\"rationale\":\"...\",\"evidence\":[{\"session_id\":\"...\",\"task_id\":\"...\",\"signal\":\"...\"}],\"prediction\":{\"expected_fix\":[\"task\"],\"at_risk\":[],\"expected_gain_pp\":0.0,\"confidence\":0.0},\"ops\":[{\"action\":\"<action from the list>\",\"component\":\"<component path>\",\"target\":\"<optional marker/heading/key>\",\"content\":\"<text or JSON value>\"}]}]}\n",
     );
     out
 }
@@ -215,7 +235,17 @@ impl Proposer for ModelProposer {
                 timeout: std::time::Duration::from_secs(180),
             };
             let response = self.model.generate(request).await.map_err(|error| anyhow::anyhow!("proposer model call failed: {error}"))?;
-            let patches = patch::parse(&response.text).context("proposer returned unparsable patches")?;
+            if response.text.trim().is_empty() {
+                // An empty completion is a provider/model problem, not a parse problem: say so and
+                // show why it stopped instead of blaming the patch format.
+                bail!(
+                    "proposer returned an empty completion (finish: {}, reasoning_chars: {}); \
+                     raise the proposer token budget or lower reasoning effort",
+                    response.finish_reason.as_str(),
+                    response.reasoning.chars().count()
+                );
+            }
+            let patches = patch::parse(&response.text).with_context(|| format!("proposer output preview: {}", crate::jsutil::take_chars(&response.text, 400)))?;
             if patches.is_empty() {
                 bail!("proposer returned no patches");
             }
@@ -369,6 +399,8 @@ pub async fn run_round(
             max_tasks: opts.eval_max_tasks.max(1),
             timeout_ms: 120_000,
             variant: Some(variant),
+            concurrency: 3,
+            retries: 1,
         };
         if config.max_tasks > 0 {
             eval_opts.max_tasks = eval_opts.max_tasks.min(config.max_tasks);
@@ -470,6 +502,8 @@ pub async fn run_round(
             max_tasks: opts.eval_max_tasks.max(1).min(if config.max_tasks > 0 { config.max_tasks } else { usize::MAX }),
             timeout_ms: 120_000,
             variant: Some(variant),
+            concurrency: 3,
+            retries: 1,
         };
         eval::run(&set, &eval_opts).await?
     };
@@ -492,6 +526,8 @@ pub async fn run_round(
                     max_tasks: set.tasks.len(),
                     timeout_ms: 120_000,
                     variant: Some(variant),
+                    concurrency: 3,
+                    retries: 1,
                 };
                 let dev_before = eval::run(&set, &base_opts).await?;
                 let mut candidate_opts = base_opts.clone();

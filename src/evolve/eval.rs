@@ -68,6 +68,10 @@ pub struct EvalOptions {
     pub max_tasks: usize,
     pub timeout_ms: u64,
     pub variant: Option<Variant>,
+    /// How many tasks run at once (clamped to 1..=8).
+    pub concurrency: u32,
+    /// Extra attempts for infrastructural failures (timeout / unparsable output).
+    pub retries: u32,
 }
 
 /// Loads `eval/tasks.json` (`{"split": {"tasks": [...]}}` or `{"tasks": [...]}`).
@@ -152,14 +156,41 @@ pub fn write_template(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Runs all tasks, judging each by exit status, expected substring and verify commands.
+/// Runs all tasks concurrently (bounded by `EvalOptions::concurrency`), judging each by exit
+/// status, expected substring and verify commands.
+///
+/// Order of `outcomes` matches the task list so two runs of the same set are comparable.
 pub async fn run(set: &EvalSet, opts: &EvalOptions) -> Result<RunSummary> {
+    use futures_util::stream::{self, StreamExt};
     let limit = if opts.max_tasks == 0 { set.tasks.len() } else { opts.max_tasks.min(set.tasks.len()) };
-    let mut outcomes = Vec::with_capacity(limit);
-    for task in set.tasks.iter().take(limit) {
-        outcomes.push(run_task(task, opts).await);
+    let concurrency = opts.concurrency.clamp(1, 8) as usize;
+    let selected: Vec<&EvalTask> = set.tasks.iter().take(limit).collect();
+    let mut outcomes: Vec<(usize, TaskOutcome)> =
+        stream::iter(selected.into_iter().enumerate()).map(|(index, task)| async move { (index, run_task_with_retry(task, opts).await) }).buffer_unordered(concurrency).collect().await;
+    outcomes.sort_by_key(|(index, _)| *index);
+    Ok(RunSummary::new(set.split, opts.bundle.clone(), opts.variant, outcomes.into_iter().map(|(_, outcome)| outcome).collect()))
+}
+
+/// Retries a task once when the failure is infrastructural (timeout or unparsable output) rather
+/// than a real wrong answer: a flaky model run should not silently change a round's score.
+async fn run_task_with_retry(task: &EvalTask, opts: &EvalOptions) -> TaskOutcome {
+    let first = run_task(task, opts).await;
+    if first.passed || opts.retries == 0 || !retryable(first.failure.as_ref()) {
+        return first;
     }
-    Ok(RunSummary::new(set.split, opts.bundle.clone(), opts.variant, outcomes))
+    let mut second = run_task(task, opts).await;
+    // Keep the better result: a retry can only rescue a flaky run, never hide a real failure.
+    if second.passed {
+        second.detail = None;
+        return second;
+    }
+    second.duration_ms = first.duration_ms.saturating_add(second.duration_ms);
+    second
+}
+
+/// Only infrastructure failures are retryable; a wrong answer or a failed verify is the result.
+fn retryable(failure: Option<&FailureSignal>) -> bool {
+    matches!(failure, Some(FailureSignal::Timeout) | Some(FailureSignal::ParseError) | Some(FailureSignal::ContextOverflow))
 }
 
 /// Judge one task result (public so tests and engine agree on the rule).
@@ -178,6 +209,8 @@ struct Judgement {
     passed: bool,
     failure: Option<FailureSignal>,
     detail: Option<String>,
+    tokens: u64,
+    session_id: Option<String>,
 }
 
 async fn run_task(task: &EvalTask, opts: &EvalOptions) -> TaskOutcome {
@@ -191,10 +224,10 @@ async fn run_task(task: &EvalTask, opts: &EvalOptions) -> TaskOutcome {
             task_id: task.id.clone(),
             passed: judgement.passed,
             score: if judgement.passed { 1.0 } else { 0.0 },
-            tokens: 0,
+            tokens: judgement.tokens,
             duration_ms,
             failure: judgement.failure,
-            session_id: None,
+            session_id: judgement.session_id,
             detail: judgement.detail,
         },
         Err(error) => {
@@ -240,6 +273,8 @@ async fn judge_task(task: &EvalTask, opts: &EvalOptions, root: &Path) -> Result<
         command.env("GOON_DATA_DIR", data_dir);
     }
 
+    let sessions_before = session_logs(opts.data_dir.as_deref());
+
     let child = command.spawn().map_err(|error| anyhow!("spawn {}: {error}", opts.goon_bin.display()))?;
     // On timeout the future is dropped, which drops the child: `kill_on_drop` then reaps it.
     let finished = tokio::time::timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await;
@@ -248,6 +283,8 @@ async fn judge_task(task: &EvalTask, opts: &EvalOptions, root: &Path) -> Result<
         Ok(Err(error)) => return Err(anyhow!("wait {}: {error}", opts.goon_bin.display())),
         Err(_) => (false, String::new(), String::new(), true),
     };
+    // Cost accounting: the child's own event log is the only place its usage lands.
+    let (tokens, session_id) = session_usage(opts.data_dir.as_deref(), &sessions_before, task.id.trim());
 
     let verify_ok = if timed_out { false } else { verify_all(&task.verify, root, timeout_ms).await? };
     let ok = passed(exit_ok, task.expect.as_deref(), &stdout, verify_ok);
@@ -266,13 +303,87 @@ async fn judge_task(task: &EvalTask, opts: &EvalOptions, root: &Path) -> Result<
     } else {
         detail_of(&stderr, &stdout)
     };
-    Ok(Judgement { passed: ok, failure, detail })
+    Ok(Judgement { passed: ok, failure, detail, tokens, session_id })
+}
+
+/// Session log file names present before a child runs (`{data}/goon/sessions/*.events.jsonl`).
+fn session_logs(data_base: Option<&Path>) -> std::collections::BTreeSet<String> {
+    let dir = match data_base {
+        Some(base) => base.join("goon").join("sessions"),
+        None => crate::config::data_dir().join("sessions"),
+    };
+    let mut names = std::collections::BTreeSet::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.ends_with(".events.jsonl") {
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+/// Token total and session id of the child run that appeared after `before`.
+///
+/// Bounded on purpose: only new logs are read, and only their `usage` events are summed.
+fn session_usage(data_base: Option<&Path>, before: &std::collections::BTreeSet<String>, task_id: &str) -> (u64, Option<String>) {
+    let dir = match data_base {
+        Some(base) => base.join("goon").join("sessions"),
+        None => crate::config::data_dir().join("sessions"),
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return (0, None) };
+    let mut candidate: Option<(bool, u64, String)> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".events.jsonl") || before.contains(&name) {
+            continue;
+        }
+        let session_id = name.trim_end_matches(".events.jsonl").to_string();
+        let mut tokens = 0u64;
+        let mut matches_task = false;
+        if let Ok(log) = crate::eventlog::read_event_log(&entry.path()) {
+            for envelope in &log.envelopes {
+                let event = &envelope.event;
+                match event.get("type").and_then(serde_json::Value::as_str) {
+                    Some("task_start") => {
+                        matches_task |= event.get("taskId").and_then(serde_json::Value::as_str) == Some(task_id);
+                    }
+                    Some("usage") => {
+                        let total = event
+                            .get("total")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or_else(|| event.get("input").and_then(serde_json::Value::as_u64).unwrap_or(0) + event.get("output").and_then(serde_json::Value::as_u64).unwrap_or(0));
+                        tokens = tokens.saturating_add(total);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // A log that names this task wins; otherwise the last one seen is kept.
+        let replace = match &candidate {
+            None => true,
+            Some((best_matches, _, _)) => matches_task && !best_matches,
+        };
+        if replace {
+            candidate = Some((matches_task, tokens, session_id));
+        }
+    }
+    match candidate {
+        Some((_, tokens, session_id)) => (tokens, Some(session_id)),
+        None => (0, None),
+    }
 }
 
 fn effective_timeout(task: &EvalTask, opts: &EvalOptions) -> u64 {
-    let task_ms = if task.timeout_ms == 0 { DEFAULT_TIMEOUT_MS } else { task.timeout_ms };
-    let budget = if opts.timeout_ms == 0 { task_ms } else { task_ms.min(opts.timeout_ms) };
-    budget.max(1)
+    // The task author knows how long the task needs; the global value is only a fallback for
+    // tasks that declare none. Clamping to the global default silently starved longer tasks.
+    let task_ms = if task.timeout_ms == 0 { 0 } else { task.timeout_ms };
+    if task_ms > 0 {
+        return task_ms.max(1);
+    }
+    let opts_ms = if opts.timeout_ms == 0 { DEFAULT_TIMEOUT_MS } else { opts.timeout_ms };
+    opts_ms.max(1)
 }
 
 fn detail_of(stderr: &str, stdout: &str) -> Option<String> {
@@ -505,6 +616,9 @@ mod tests {
             max_tasks: 8,
             timeout_ms: 0,
             variant: Some(Variant::Code),
+            concurrency: 1,
+            // Retries make a scripted test non-deterministic; the retry policy has its own test.
+            retries: 0,
         }
     }
 
@@ -535,6 +649,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrency_preserves_task_order_and_task_timeout_is_not_clamped() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let script = write_stub(dir.path(), STUB_NAME, OK_SCRIPT);
+        let names = ["a", "b", "c", "d"];
+        let tasks: Vec<EvalTask> = names.iter().map(|name| task(name, "report the task id")).collect();
+        let set = EvalSet { split: Split::Train, tasks };
+        let mut opts = options(dir.path(), script);
+        opts.concurrency = 4;
+        let summary = run(&set, &opts).await.expect("run");
+        let observed: Vec<&str> = summary.outcomes.iter().map(|outcome| outcome.task_id.as_str()).collect();
+        assert_eq!(observed, names, "concurrent runs must still report in task order");
+        assert_eq!(summary.passed(), 4);
+
+        // A task that declares a long timeout keeps it; the global value is only a fallback.
+        let mut eval_task = task("slow", "report the task id");
+        eval_task.timeout_ms = 240_000;
+        let mut short_cap = options(dir.path(), write_stub(dir.path(), STUB_NAME, OK_SCRIPT));
+        short_cap.timeout_ms = 60_000;
+        assert_eq!(effective_timeout(&eval_task, &short_cap), 240_000);
+        eval_task.timeout_ms = 0;
+        assert_eq!(effective_timeout(&eval_task, &short_cap), 60_000);
+    }
+
+    #[tokio::test]
     async fn run_judges_a_failing_task() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let script = write_stub(dir.path(), STUB_NAME, FAIL_SCRIPT);
@@ -547,6 +685,26 @@ mod tests {
         assert_eq!(outcome.failure, Some(FailureSignal::VerifyFail));
         assert!(outcome.detail.as_deref().unwrap_or_default().contains("verify failed"));
         assert_eq!(outcome.score, 0.0);
+    }
+
+    #[tokio::test]
+    async fn retry_policy_covers_infrastructure_not_answers() {
+        // Infrastructure failures are retryable; a wrong answer or failed verify is the result.
+        assert!(retryable(Some(&FailureSignal::Timeout)));
+        assert!(retryable(Some(&FailureSignal::ParseError)));
+        assert!(retryable(Some(&FailureSignal::ContextOverflow)));
+        assert!(!retryable(Some(&FailureSignal::VerifyFail)));
+        assert!(!retryable(Some(&FailureSignal::ToolError)));
+        assert!(!retryable(None));
+
+        // A passing task is never retried, and retries: 0 disables the path entirely.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let script = write_stub(dir.path(), STUB_NAME, OK_SCRIPT);
+        let mut opts = options(dir.path(), script);
+        opts.retries = 1;
+        let outcome = run_task_with_retry(&task("ok", "report the task id"), &opts).await;
+        assert!(outcome.passed);
+        assert!(outcome.duration_ms > 0);
     }
 
     #[tokio::test]

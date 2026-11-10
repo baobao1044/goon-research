@@ -375,6 +375,8 @@ async fn eval_cmd(values: &Parsed, config: &Config) -> Result<()> {
         max_tasks: values.str("max-tasks").and_then(|raw| raw.parse().ok()).unwrap_or(config.evolve.max_tasks.max(1)),
         timeout_ms: 120_000,
         variant: Some(variant_arg(values)),
+        concurrency: 3,
+        retries: 1,
     };
     let run = eval::run(&set, &opts).await?;
     if values.flag("json") {

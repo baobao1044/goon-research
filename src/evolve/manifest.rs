@@ -51,8 +51,16 @@ pub fn decide(before: &RunSummary, after: &RunSummary, dev: Option<(&RunSummary,
         return GateDecision::reject(format!("gain {:.1}pp below required {:.1}pp", gain_pp, gate.min_gain_pp));
     }
 
-    // (c2) A round that fixed nothing is not an improvement, even when nothing regressed.
+    // (c2) Same outcomes but a much larger bill is a regression in efficiency, not a win.
+    // Only applies when both runs reported usage; missing usage is unknown, not zero.
     let fixed: Vec<String> = after.passed_ids().difference(&before.passed_ids()).cloned().collect();
+    let (before_tokens, after_tokens) = (before.tokens(), after.tokens());
+    let tokens_grew = before_tokens > 0 && after_tokens > before_tokens.saturating_mul(11) / 10;
+    if fixed.is_empty() && tokens_grew {
+        return GateDecision::reject(format!("no outcome changed but tokens rose {} -> {} (>10%): edit is not efficient", before_tokens, after_tokens));
+    }
+
+    // (c3) A round that fixed nothing is not an improvement, even when nothing regressed.
     let still_failing = after.failed_ids();
     let untouched = still_failing.intersection(&before.failed_ids()).count();
     if fixed.is_empty() && untouched == before.failed_ids().len() && untouched > 0 {
@@ -360,6 +368,26 @@ mod tests {
             GateDecision::Reject { reason } => assert!(reason.contains("no tasks measured"), "reason: {reason}"),
             other => panic!("expected reject, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decide_rejects_a_round_that_only_costs_more() {
+        // Same outcomes, but the candidate burns more than 10% extra tokens.
+        let mut before = run(Split::Train, &["a"], &["b"]);
+        let mut after = run(Split::Train, &["a"], &["b"]);
+        before.outcomes.iter_mut().for_each(|outcome| outcome.tokens = 100);
+        after.outcomes.iter_mut().for_each(|outcome| outcome.tokens = 130);
+        match decide(&before, &after, None, &gate(&["a"])) {
+            GateDecision::Reject { reason } => assert!(reason.contains("tokens rose"), "reason: {reason}"),
+            other => panic!("expected reject, got {other:?}"),
+        }
+        // A modest increase is fine when nothing regressed and nothing was fixed? No: a no-op
+        // round is already rejected above, so this only guards the efficiency case.
+        let mut cheap = run(Split::Train, &["a", "b"], &["c"]);
+        let mut cheaper_after = run(Split::Train, &["a", "b", "c"], &[]);
+        cheap.outcomes.iter_mut().for_each(|outcome| outcome.tokens = 1_000);
+        cheaper_after.outcomes.iter_mut().for_each(|outcome| outcome.tokens = 1_000);
+        assert_eq!(decide(&cheap, &cheaper_after, None, &gate(&["a"])), GateDecision::Accept);
     }
 
     #[test]

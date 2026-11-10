@@ -416,6 +416,13 @@ Khi một bundle đang được áp, harness có thêm 4 lớp điều khiển b
   tham số); tham số bị giới hạn bộ ký tự an toàn nên không thành injection, vẫn qua approval/policy.
 - **Loop policy** (`policy/loop.json`) và `maxRepairRounds` trong `policy/verify.json` chặn vòng lặp
   vô hạn và đặt số lần sửa verify.
+- **`--model-proposer`**: để model tự đề xuất patch (JSON theo đúng từ vựng kind/action); nếu model
+  đặt tên kind lạ, kind được suy ra từ ops thay vì bỏ patch. `add_tool` đăng ký tool thật.
+- **Đo chi phí thật**: mỗi task eval báo `tokens` + session id đọc từ event log của chính nó; eval
+  chạy song song (mặc định 3 task), timeout của task được tôn trọng, lỗi hạ tầng (timeout/parse)
+  được retry 1 lần, còn câu trả lời sai thì không.
+- **Cổng hiệu quả**: không fix được task nào → reject; pass rate giữ nguyên mà token tăng >10% →
+  reject; round không có bằng chứng → reject (không bịa patch rỗng).
 
 Cổng chấp nhận (fail-closed): không có task nào được đo → **reject**; pass rate giảm → reject;
 mất task đã từng giải → reject; dev giảm → reject (khi bật). Bundle bị từ chối không ghi vào

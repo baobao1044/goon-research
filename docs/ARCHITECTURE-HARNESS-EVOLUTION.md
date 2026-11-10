@@ -137,7 +137,12 @@ would displace the verification instruction the next step must act on.
 The evolution agent can only emit these operations; there is no "write this file" primitive:
 
 `append_section`, `replace_block` (marker-bounded), `insert_bullet` (heading-scoped),
-`set_param` (JSON policy), `add_skill`, `remove_skill`.
+`set_param` (JSON policy), `add_skill`, `remove_skill`, `add_tool` (registers a real callable
+tool in `tools/registry.json`).
+
+A patch may omit `kind` or name one outside the vocabulary: the kind is then inferred from the
+ops (an `append_section` on `middleware.md` is a prompt rule, `add_skill` is a skill edit,
+`add_tool` is a new capability), so a slightly wrong label does not throw away a usable edit.
 
 Hard limits enforced in `patch.rs`: `MAX_OPS = 8`, `MAX_GROWTH_BYTES = 8192`,
 `MAX_REPLACED_RATIO = 0.5`, and every path must pass `EditScope`:
@@ -148,7 +153,20 @@ Hard limits enforced in `patch.rs`: `MAX_OPS = 8`, `MAX_GROWTH_BYTES = 8192`,
 `--yolo`, auto-approval and subagents cannot widen this. The verifier is the reward signal, so
 it stays read-only to the thing being optimized.
 
-## 8. Where the measurements come from (and their limits)
+## 8. Measuring a round (and what the numbers cost)
+
+Evaluation runs the real CLI per task, up to `concurrency` tasks at once (default 3, clamp 1..8),
+in a throwaway directory. Ordering of outcomes follows the task list, so two runs of the same set
+are comparable.
+
+- A task's own `timeout_ms` is authoritative; `EvalOptions::timeout_ms` is only a fallback for
+  tasks that declare none. (Clamping to the global default silently starved longer tasks.)
+- Infrastructure failures (`timeout`, `parse_error`, `context_overflow`) are retried once when
+  `retries > 0`; a wrong answer or a failed verify is never retried.
+- Each outcome carries the child's session id and its real token total, read from the child's own
+  event log — so a round reports what it cost, not zero.
+
+## 9. Where the measurements come from (and their limits)
 
 - Train split drives diagnosis and the round decision; dev split gates durability; test split is
   read at most once (AutoSaddler discipline).
@@ -161,7 +179,7 @@ Honest limits compared with the papers: eval sets here are small (default
 `max_tasks = 10`), rounds are manual, and there is no RL/training bridge. Expect a handful of
 tasks and one round per invocation, not 89 tasks × 10 rounds versus Terminal-Bench.
 
-## 9. Commands
+## 10. Commands
 
 ```bash
 goon evolve init                     # seed .goon/harness + eval/tasks.json
@@ -182,7 +200,7 @@ goon --jit -p '...'                  # enable JIT selection for this run
 State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manifests/<round>.json`,
 `runs/<id>.json`, `digest/`, `evodag.jsonl`, `solved.json`, `jit.jsonl`.
 
-## 10. Failure modes handled explicitly
+## 11. Failure modes handled explicitly
 
 | Failure | Handling |
 |---|---|
@@ -199,7 +217,7 @@ State layout (`{data_dir}/harness/`): `snapshots/<id>/`, `bundles.jsonl`, `manif
 | Run loops forever making tool calls | `policy/loop.json maxSteps` stops it |
 | Bundle declares a tool with hostile arguments | argument charset allowlist refuses it |
 
-## 11. The 29 design patterns (paper 4) and where this repo stands
+## 12. The 29 design patterns (paper 4) and where this repo stands
 
 `✅` implemented · `🟡` partial · `❌` not implemented · `—` out of scope
 
@@ -239,9 +257,9 @@ Count: ✅ 10 · 🟡 12 · ❌ 6 · — 1. The gaps are deliberate: this is a s
 at Termux, and every pattern skipped here (session trees, client/server split, cache fanout,
 neural code RAG) is a large subsystem whose cost would land on every user.
 
-## 12. Test coverage
+## 13. Test coverage
 
-`cargo test --lib evolve` — 77 tests over `bundle`, `store`, `digest`, `patch`, `manifest`,
+`cargo test --lib evolve` — 81 tests over `bundle`, `store`, `digest`, `patch`, `manifest`,
 `profile`, `jit`, `eval`, `pipeline`, `types`, plus CLI-level coverage in `tests/evolve.test.mjs`
 (11 tests: seeding, status, digest, unmeasured-round rejection, JIT planning, revert, bundle
 application with a `harness` event, snapshot identity, a bundle-declared tool that really runs,
