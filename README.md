@@ -447,6 +447,10 @@ goon evolve log
 goon --bundle <id> -p 'sửa lỗi này'  # áp bundle cho một phiên
 ```
 
+Terminal-Bench 4.1 (tbench.ai): dataset 66 task đã tải + harbor đã cài, nhưng máy này không có
+Docker/WSL2/Modal nên chưa chạy được — xem [docs/BENCHMARK-TERMINAL-BENCH.md](docs/BENCHMARK-TERMINAL-BENCH.md)
+cho bằng chứng và cách mở khoá.
+
 Benchmark kiểu FrontierCode (mergeability: blockers + weighted criteria + fair-internet-use): xem
 [docs/BENCHMARK-FRONTIERCODE.md](docs/BENCHMARK-FRONTIERCODE.md) — kèm số liệu chạy thật và lý do
 không thể báo điểm FrontierCode gốc (benchmark đóng).
