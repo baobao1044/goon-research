@@ -227,6 +227,24 @@ Goon chấp nhận nhiều kiểu gọi tool sai lệch thay vì kết thúc lư
   (tối đa 4) **chỉ khi cùng tool và path rời nhau**; ghi cùng một file, `apply_patch` nhiều file,
   hay `bash` vẫn tuần tự để giữ thứ tự và tính đúng.
 
+## goon desktop (Windows)
+
+`goon web` mở shell desktop thật cho CLI: một HTTP server nhỏ chỉ bind loopback, phục vụ UI nhúng
+(không bundler, không node_modules, không CDN) và mở bằng cửa sổ Chromium `--app=` nên trông như app
+riêng, không có thanh địa chỉ.
+
+```bash
+goon web                 # mở cửa sổ desktop trong thư mục hiện tại
+goon web --port 7788     # chọn cổng cố định
+goon web --no-open       # chỉ chạy server (dùng cho script/CI)
+bin\goon-desktop.cmd .   # double-click / shortcut trên Windows
+```
+
+- UI: chat + timeline tool (đọc/sửa/bash/verify/compaction/retry), panel diff/output, danh sách session.
+- Mọi thứ chạy qua chính binary này: server spawn `goon --json -p ...` rồi relay NDJSON thành SSE,
+  nên UI hiển thị đúng những gì CLI phát ra, không có logic agent thứ hai.
+- Chỉ bind `127.0.0.1`; `validate_host` từ chối mọi địa chỉ khác — đây là shell desktop, không phải server.
+
 ## Harness, Công cụ & Hoàn tác (Checkpoint / Rewind)
 - **Bộ công cụ tích hợp đầy đủ**:
   - **File & Shell**: `read_file`, `list_files`, `search`, `write_file`, `edit_file`, `apply_patch`, `bash`, `view_image`.

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>goon desktop</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="dot"></span>
+          <span class="name">goon</span>
+          <span class="tag">desktop</span>
+        </div>
+        <div class="meta" id="meta">connecting…</div>
+        <div class="section-title">Sessions</div>
+        <div class="sessions" id="sessions"></div>
+        <div class="spacer"></div>
+        <div class="hint">
+          Runs the same binary as the CLI.<br />
+          <code>--json</code> events are streamed as they happen.
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="cwd" id="cwd">—</div>
+          <div class="status" id="status">idle</div>
+        </header>
+
+        <div class="transcript" id="transcript">
+          <div class="empty" id="empty">
+            <h1>goon desktop</h1>
+            <p>Ask for a change, paste an error, or point at a file.</p>
+            <div class="chips">
+              <button class="chip" data-prompt="Đọc repo này và tóm tắt kiến trúc trong 10 dòng.">tóm tắt kiến trúc</button>
+              <button class="chip" data-prompt="Tìm lỗi trong repo, sửa và chạy kiểm tra phù hợp.">tìm và sửa lỗi</button>
+              <button class="chip" data-prompt="Review git diff hiện tại và chỉ ra rủi ro.">review diff</button>
+            </div>
+          </div>
+        </div>
+
+        <form class="composer" id="form">
+          <textarea id="prompt" rows="3" placeholder="Nhập yêu cầu… (Ctrl+Enter để gửi)"></textarea>
+          <div class="composer-actions">
+            <span class="counter" id="counter">0</span>
+            <button type="submit" id="send">Send</button>
+          </div>
+        </form>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

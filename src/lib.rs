@@ -52,4 +52,5 @@ pub mod tools;
 pub mod tui;
 pub mod verify;
 pub mod version;
+pub mod web;
 pub mod workflow;

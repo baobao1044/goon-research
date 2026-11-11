@@ -88,6 +88,8 @@ pub const MAIN_OPTIONS: &[OptSpec] = &[
     s("max-tasks", None),
     s("goon-bin", None),
     s("trials", None),
+    s("port", None),
+    b("no-open", None),
 ];
 
 pub const MCP_ADD_OPTIONS: &[OptSpec] = &[s("url", None), s("bearer-env", None), s("bearer-token-env-var", None), m("env"), b("trust", None), s("timeout-ms", None)];

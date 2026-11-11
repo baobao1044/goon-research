@@ -642,6 +642,19 @@ async fn main_inner(argv: Vec<String>) -> Result<()> {
         }
         return Ok(());
     }
+    if first == Some("web") || first == Some("desktop") {
+        let port = values.str("port").and_then(|raw| raw.parse::<u16>().ok()).unwrap_or(0);
+        let passthrough: Vec<String> = positionals.iter().skip(1).filter(|arg| arg.starts_with('-')).cloned().collect();
+        let options = crate::web::WebOptions {
+            port,
+            open: !values.flag("no-open"),
+            cwd: std::path::absolute(cwd_flag.clone().unwrap_or_else(|| ".".into())).unwrap_or_else(|_| PathBuf::from(".")),
+            data_dir: config::data_dir(),
+            passthrough,
+        };
+        crate::web::validate_host("127.0.0.1")?;
+        return crate::web::run(options);
+    }
     if first == Some("evolve") {
         return evolve_cmd::run(&positionals, &values, &config).await;
     }
