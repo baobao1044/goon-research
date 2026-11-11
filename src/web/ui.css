@@ -353,6 +353,77 @@ details.panel pre {
   cursor: pointer;
 }
 
+#stop {
+  background: transparent;
+  color: var(--bad);
+  border: 1px solid color-mix(in srgb, var(--bad) 50%, var(--line));
+  border-radius: 9px;
+  padding: 8px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#stop:hover {
+  background: color-mix(in srgb, var(--bad) 12%, transparent);
+}
+
+.bubble.assistant code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 4px;
+}
+
+.bubble.assistant pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+  white-space: pre;
+}
+
+.bubble.assistant strong {
+  font-weight: 650;
+}
+
+.session .wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.session .sub {
+  font-size: 10.5px;
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session button.copy {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 6px;
+  font-size: 10px;
+  padding: 2px 6px;
+  cursor: pointer;
+  align-self: center;
+}
+
+.session button.copy:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 #send:disabled {
   opacity: 0.5;
   cursor: default;

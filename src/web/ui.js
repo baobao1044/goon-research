@@ -1,4 +1,4 @@
-// goon desktop front-end: streams the CLI's own NDJSON events into a chat transcript.
+﻿// goon desktop front-end: streams the CLI's own NDJSON events into a chat transcript.
 // No framework, no build step: the binary serves this file.
 
 const transcript = document.getElementById("transcript");
@@ -6,6 +6,7 @@ const empty = document.getElementById("empty");
 const form = document.getElementById("form");
 const promptBox = document.getElementById("prompt");
 const sendButton = document.getElementById("send");
+const stopButton = document.getElementById("stop");
 const counter = document.getElementById("counter");
 const statusChip = document.getElementById("status");
 const cwdChip = document.getElementById("cwd");
@@ -16,15 +17,56 @@ let running = false;
 let assistantBubble = null;
 let assistantText = "";
 
-function escapeText(value) {
-  return String(value ?? "");
+// A deliberately small renderer: fenced code, inline code, bold, and line breaks. It builds DOM
+// nodes instead of injecting HTML, so model output can never become markup.
+function renderMarkdown(node, text) {
+  node.textContent = "";
+  const parts = String(text).split(/```/);
+  parts.forEach((part, index) => {
+    if (index % 2 === 1) {
+      const pre = document.createElement("pre");
+      const body = part.replace(/^[a-zA-Z0-9_+-]*\n/, "");
+      pre.textContent = body.replace(/\n$/, "");
+      node.appendChild(pre);
+      return;
+    }
+    const lines = part.split("\n");
+    lines.forEach((line, lineIndex) => {
+      if (lineIndex > 0) node.appendChild(document.createTextNode("\n"));
+      appendInline(node, line);
+    });
+  });
+}
+
+function appendInline(parent, line) {
+  const pattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  let last = 0;
+  for (const match of line.matchAll(pattern)) {
+    if (match.index > last) parent.appendChild(document.createTextNode(line.slice(last, match.index)));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      parent.appendChild(code);
+    } else {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      parent.appendChild(strong);
+    }
+    last = match.index + token.length;
+  }
+  if (last < line.length) parent.appendChild(document.createTextNode(line.slice(last)));
 }
 
 function addBubble(kind, text) {
   if (empty) empty.style.display = "none";
   const node = document.createElement("div");
   node.className = `bubble ${kind}`;
-  node.textContent = escapeText(text);
+  if (kind === "assistant") {
+    renderMarkdown(node, text);
+  } else {
+    node.textContent = String(text ?? "");
+  }
   transcript.appendChild(node);
   transcript.scrollTop = transcript.scrollHeight;
   return node;
@@ -63,6 +105,7 @@ function addPanel(summary, body) {
 function setRunning(value) {
   running = value;
   sendButton.disabled = value;
+  stopButton.hidden = !value;
   statusChip.textContent = value ? "running" : "idle";
   statusChip.className = value ? "status running" : "status";
 }
@@ -73,7 +116,7 @@ function assistantAppend(chunk) {
     assistantText = "";
   }
   assistantText += chunk;
-  assistantBubble.textContent = assistantText;
+  renderMarkdown(assistantBubble, assistantText);
   transcript.scrollTop = transcript.scrollHeight;
 }
 
@@ -153,7 +196,6 @@ function renderEvent(event) {
   if (type === "harness" || type === "task_start" || type === "jit_repaired" || type === "harness_hook") {
     return;
   }
-  // Anything else is kept visible but compact, so new CLI events are never silently dropped.
   addEvent([type || "event"]);
 }
 
@@ -163,6 +205,7 @@ async function loadMeta() {
     const meta = await response.json();
     cwdChip.textContent = meta.cwd || "—";
     metaBox.textContent = `${meta.provider || "provider"} · ${meta.model || "no model"}\nv${meta.version || "?"}`;
+    document.title = `goon desktop — ${meta.model || "no model"}`;
   } catch (error) {
     metaBox.textContent = "CLI not reachable";
   }
@@ -183,12 +226,25 @@ async function loadSessions() {
     for (const session of list.slice(0, 25)) {
       const row = document.createElement("div");
       row.className = "session";
+      const wrap = document.createElement("div");
+      wrap.className = "wrap";
       const title = document.createElement("span");
-      title.textContent = (session.title || session.cwd || "session").slice(0, 22);
-      const id = document.createElement("span");
-      id.className = "id";
-      id.textContent = String(session.id || "").slice(0, 8);
-      row.append(title, id);
+      title.textContent = (session.title || session.cwd || "session").slice(0, 24);
+      const sub = document.createElement("span");
+      sub.className = "sub";
+      sub.textContent = `${String(session.id || "").slice(0, 8)} · ${session.model || "?"}`;
+      wrap.append(title, sub);
+      const copy = document.createElement("button");
+      copy.className = "copy";
+      copy.type = "button";
+      copy.textContent = "id";
+      copy.title = "copy the full session id";
+      copy.addEventListener("click", () => {
+        navigator.clipboard?.writeText(String(session.id || ""));
+        copy.textContent = "ok";
+        setTimeout(() => (copy.textContent = "id"), 1200);
+      });
+      row.append(wrap, copy);
       sessionsBox.appendChild(row);
     }
   } catch (error) {
@@ -258,6 +314,19 @@ form.addEventListener("submit", event => {
   promptBox.value = "";
   counter.textContent = "0";
   runPrompt(text);
+});
+
+stopButton.addEventListener("click", async () => {
+  stopButton.disabled = true;
+  try {
+    const response = await fetch("/api/cancel", { method: "POST" });
+    const payload = await response.json();
+    addEvent([{ text: "stop ", className: "warn" }, payload.ok ? "sent" : payload.reason || "failed"]);
+  } catch (error) {
+    addEvent([{ text: "stop ", className: "bad" }, String(error)]);
+  } finally {
+    stopButton.disabled = false;
+  }
 });
 
 promptBox.addEventListener("input", () => {

@@ -53,7 +53,7 @@ pub fn run_with<F: FnOnce(&str)>(options: WebOptions, on_ready: F) -> Result<()>
     let listener = TcpListener::bind(("127.0.0.1", options.port)).with_context(|| format!("bind 127.0.0.1:{}", options.port))?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}/");
-    let shared = Arc::new(ServerState { options, running: AtomicUsize::new(0), child_bin: current_binary()? });
+    let shared = Arc::new(ServerState { options, running: AtomicUsize::new(0), child_bin: current_binary()?, child_pid: std::sync::Mutex::new(None) });
     on_ready(&url);
     if shared.options.open {
         if let Err(error) = open_window(&url) {
@@ -81,6 +81,8 @@ struct ServerState {
     options: WebOptions,
     running: AtomicUsize,
     child_bin: PathBuf,
+    /// PID of the live child run, so the UI's Stop button can actually interrupt it.
+    child_pid: std::sync::Mutex<Option<u32>>,
 }
 
 fn current_binary() -> Result<PathBuf> {
@@ -132,12 +134,43 @@ fn handle(mut stream: TcpStream, state: &Arc<ServerState>) -> Result<()> {
         ("GET", "/api/meta") => respond_json(&mut stream, &meta(state)),
         ("GET", "/api/sessions") => respond_json(&mut stream, &sessions(state)),
         ("POST", "/api/prompt") => prompt(stream, state, &body),
-        ("POST", "/api/cancel") => {
-            // Cancelling is out of scope for the first shell: the UI simply stops reading and the
-            // child finishes its turn. Say so instead of pretending.
-            respond_json(&mut stream, &json!({"ok": false, "reason": "cancel is not implemented; the run finishes its current turn"}))
-        }
+        ("POST", "/api/cancel") => respond_json(&mut stream, &cancel(state)),
         _ => respond_status(&mut stream, 404, "text/plain", b"not found"),
+    }
+}
+
+/// Interrupts the live child run, if any.
+///
+/// The CLI already treats termination as a clean cancellation (it checkpoints and records terminal
+/// tool results), so killing the child is the correct stop signal rather than a special protocol.
+fn cancel(state: &Arc<ServerState>) -> Value {
+    let pid = state.child_pid.lock().map(|guard| *guard).unwrap_or(None);
+    let Some(pid) = pid else {
+        return json!({"ok": false, "reason": "no run in progress"});
+    };
+    match terminate(pid) {
+        Ok(()) => json!({"ok": true, "pid": pid}),
+        Err(error) => json!({"ok": false, "reason": error.to_string()}),
+    }
+}
+
+#[cfg(windows)]
+fn terminate(pid: u32) -> Result<()> {
+    let status = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status().context("run taskkill")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("taskkill exited with {status}")
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate(pid: u32) -> Result<()> {
+    let status = Command::new("kill").args(["-TERM", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status().context("run kill")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("kill exited with {status}")
     }
 }
 
@@ -186,6 +219,9 @@ fn stream_events(stream: &mut TcpStream, state: &Arc<ServerState>, prompt: &str)
         command.arg(extra);
     }
     let mut child = command.spawn().with_context(|| format!("spawn {}", state.child_bin.display()))?;
+    if let Ok(mut guard) = state.child_pid.lock() {
+        *guard = child.id().into();
+    }
     let stderr = child.stderr.take();
     write_head(stream, "text/event-stream")?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("child has no stdout"))?;
@@ -201,6 +237,9 @@ fn stream_events(stream: &mut TcpStream, state: &Arc<ServerState>, prompt: &str)
         }
     }
     let status = child.wait().context("wait for the child run")?;
+    if let Ok(mut guard) = state.child_pid.lock() {
+        *guard = None;
+    }
     let mut note = json!({"type": "exit", "code": status.code().unwrap_or(-1)});
     if let Some(stderr) = stderr {
         let tail: String = BufReader::new(stderr).lines().map_while(|line| line.ok()).collect::<Vec<String>>().join("\n");
@@ -370,7 +409,8 @@ mod tests {
         assert!(missing.starts_with("HTTP/1.1 404"));
 
         let cancel = request(port, "POST /api/cancel HTTP/1.1\r\ncontent-length: 0\r\n\r\n");
-        assert!(cancel.contains("not implemented"), "{cancel}");
+        // Nothing is running in this test, so cancel reports that honestly instead of pretending.
+        assert!(cancel.contains("no run in progress"), "{cancel}");
     }
 
     #[test]
