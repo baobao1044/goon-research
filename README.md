@@ -478,9 +478,9 @@ goon evolve log
 goon --bundle <id> -p 'sửa lỗi này'  # áp bundle cho một phiên
 ```
 
-Terminal-Bench 4.1 (tbench.ai): chạy được trên máy này qua WSL2 + Docker + harbor (0 exception với
-`oracle` → reward 1.0 và `nop` → 0.0). Còn thiếu: agent thật cần model, mà gateway Windows chưa mở
-firewall cho WSL — xem [docs/BENCHMARK-TERMINAL-BENCH.md](docs/BENCHMARK-TERMINAL-BENCH.md).
+Terminal-Bench 4.1 (tbench.ai): chạy được trên máy này qua WSL2 + Docker + harbor. Đã đo 6 task CPU
+với `terminus-2` + DeepSeek V4.1 Flash: **2/6 (33.3%)**, 0 exception; kiểm chứng hai chiều bằng
+`oracle` 1.0 và `nop` 0.0. Chi tiết + chi phí token: [docs/BENCHMARK-TERMINAL-BENCH.md](docs/BENCHMARK-TERMINAL-BENCH.md).
 
 Benchmark kiểu FrontierCode (mergeability: blockers + weighted criteria + fair-internet-use): xem
 [docs/BENCHMARK-FRONTIERCODE.md](docs/BENCHMARK-FRONTIERCODE.md) — kèm số liệu chạy thật và lý do
