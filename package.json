@@ -49,7 +49,9 @@
     "test:one": "cargo build --locked && node --test",
     "check": "npm run lint && cargo test --locked && node --test --test-concurrency=4 \"tests/*.test.mjs\" \"tests/e2e/*.test.mjs\"",
     "dev": "cargo build --locked && node bin/goon.mjs",
-    "release:pack": "node scripts/pack-release.mjs"
+    "ui:check": "node scripts/ui-check.mjs",
+    "release:pack": "node scripts/pack-release.mjs",
+    "desktop:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop/install.ps1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

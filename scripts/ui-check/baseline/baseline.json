@@ -1,0 +1,120 @@
+{
+  "generatedAt": "2026-11-11T10:15:06.917Z",
+  "chrome": "Chrome/157.0.8103.51",
+  "viewports": [
+    "1280x860",
+    "900x600"
+  ],
+  "tolerancePercent": 0.5,
+  "masks": [
+    "#cwd"
+  ],
+  "artifacts": {
+    "intro": {
+      "file": "intro.png",
+      "sha256": "a37847b4018cb3031bfd03a18b706ef369bf65b6289e6ef485cde6b4a2c4ee8d",
+      "bytes": 24520,
+      "width": 1280,
+      "height": 860,
+      "maskedRegions": []
+    },
+    "idle": {
+      "file": "idle.png",
+      "sha256": "4e6afab833036fe372a05dd7663bacd0e5b165b410238a82ac66a10e5ae6684f",
+      "bytes": 38704,
+      "width": 1280,
+      "height": 860,
+      "maskedRegions": [
+        {
+          "x": 290,
+          "y": 11,
+          "width": 892,
+          "height": 22
+        },
+        {
+          "x": 6,
+          "y": 146,
+          "width": 231,
+          "height": 35
+        }
+      ]
+    },
+    "transcript": {
+      "file": "transcript.png",
+      "sha256": "02387e2c61cdea3e7e84af889f500c5fdeb4757c0e8b4833747b2d582c7044ad",
+      "bytes": 37203,
+      "width": 1280,
+      "height": 860,
+      "maskedRegions": [
+        {
+          "x": 290,
+          "y": 11,
+          "width": 892,
+          "height": 22
+        },
+        {
+          "x": 6,
+          "y": 146,
+          "width": 231,
+          "height": 49
+        }
+      ]
+    },
+    "intro-compact": {
+      "file": "intro-compact.png",
+      "sha256": "f64a25a9a3c63e61abaefaf5eeec461e28bd45a45aa8edea8bd891becbcf5ed7",
+      "bytes": 16570,
+      "width": 900,
+      "height": 600,
+      "maskedRegions": []
+    },
+    "idle-compact": {
+      "file": "idle-compact.png",
+      "sha256": "7108dca2fc4f6051b9bce9178c7ca0f45fc49b842fc50bf89b80e0afe8557c91",
+      "bytes": 33808,
+      "width": 900,
+      "height": 600,
+      "maskedRegions": [
+        {
+          "x": 214,
+          "y": 11,
+          "width": 616,
+          "height": 22
+        },
+        {
+          "x": 3,
+          "y": 138,
+          "width": 189,
+          "height": 47
+        }
+      ]
+    },
+    "transcript-compact": {
+      "file": "transcript-compact.png",
+      "sha256": "4aff90f7ca6ca4e3ff323c9dcbba9b1bfc3fb37d6fd960a6e712c4f17e2235d8",
+      "bytes": 34623,
+      "width": 900,
+      "height": 600,
+      "maskedRegions": [
+        {
+          "x": 214,
+          "y": 11,
+          "width": 616,
+          "height": 22
+        },
+        {
+          "x": 3,
+          "y": 138,
+          "width": 189,
+          "height": 47
+        },
+        {
+          "x": 3,
+          "y": 182,
+          "width": 189,
+          "height": 47
+        }
+      ]
+    }
+  }
+}

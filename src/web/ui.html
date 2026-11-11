@@ -1,53 +1,94 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>goon desktop</title>
+    <!-- Native controls and the canvas gutter follow the OS theme before any CSS lands. -->
+    <meta name="color-scheme" content="dark light" />
+    <!-- The UI is authored in Vietnamese on an English-locale Windows; Chrome's translate bubble
+         would sit on top of the composer, so translation is explicitly disabled. -->
+    <meta name="google" content="notranslate" />
+    <title>goon</title>
     <link rel="stylesheet" href="/app.css" />
   </head>
-  <body>
-    <div class="shell">
-      <aside class="sidebar">
-        <div class="brand">
-          <span class="dot"></span>
-          <span class="name">goon</span>
-          <span class="tag">desktop</span>
+  <body translate="no">
+    <!-- Intro: pure decoration, so it is hidden from assistive tech and skipped by any input.
+         ui.js fills .letters with one .letter per character and sets --i / --base on each. -->
+    <div class="intro" id="intro" aria-hidden="true">
+      <div class="intro-stage">
+        <div class="kinetic" id="kinetic">
+          <span class="word" data-word="goon"><span class="mask"><span class="letters"></span></span></span>
+          <span class="word" data-word="desktop"><span class="mask"><span class="letters"></span></span></span>
         </div>
-        <div class="meta" id="meta">connecting…</div>
-        <div class="section-title">Sessions</div>
-        <div class="sessions" id="sessions"></div>
-        <div class="spacer"></div>
-        <div class="hint">
-          Runs the same binary as the CLI.<br />
-          <code>--json</code> events are streamed as they happen.
+        <div class="intro-rule" id="intro-rule"><span class="intro-rule-fill"></span></div>
+        <div class="intro-meta" id="intro-meta">
+          <span>local</span>
+          <span class="meta-sep"></span>
+          <span>your keys</span>
+          <span class="meta-sep"></span>
+          <span>your files</span>
+        </div>
+      </div>
+      <div class="intro-skip">ấn phím bất kỳ để bỏ qua</div>
+    </div>
+
+    <div class="shell is-hidden" id="shell">
+      <aside class="rail" aria-label="phiên làm việc">
+        <div class="rail-brand">
+          <span class="mark" aria-hidden="true"></span>
+          <span class="rail-name">goon</span>
+          <span class="rail-tag">desktop</span>
+        </div>
+        <div class="rail-meta" id="meta">—</div>
+        <div class="rail-label">phiên</div>
+        <div class="rail-sessions" id="sessions"></div>
+        <div class="rail-foot">
+          <span>cùng một binary với CLI</span>
+          <span>event stream trực tiếp</span>
         </div>
       </aside>
 
-      <main class="main">
-        <header class="topbar">
-          <div class="cwd" id="cwd">—</div>
-          <div class="status" id="status">idle</div>
+      <main class="stage">
+        <header class="bar">
+          <div class="bar-cwd" id="cwd">—</div>
+          <div class="bar-status" id="status" data-state="idle" role="status" aria-live="polite">idle</div>
         </header>
 
-        <div class="transcript" id="transcript">
-          <div class="empty" id="empty">
-            <h1>goon desktop</h1>
-            <p>Ask for a change, paste an error, or point at a file.</p>
-            <div class="chips">
-              <button class="chip" data-prompt="Đọc repo này và tóm tắt kiến trúc trong 10 dòng.">tóm tắt kiến trúc</button>
-              <button class="chip" data-prompt="Tìm lỗi trong repo, sửa và chạy kiểm tra phù hợp.">tìm và sửa lỗi</button>
-              <button class="chip" data-prompt="Review git diff hiện tại và chỉ ra rủi ro.">review diff</button>
+        <div class="scroll" id="transcript" role="log" aria-live="polite" aria-label="hội thoại">
+          <div class="blank" id="empty">
+            <div class="blank-line">
+              <span>goon</span>
+              <span class="blank-dot"></span>
+              <span>desktop</span>
+              <span class="blank-rule"></span>
+            </div>
+            <h1 class="blank-title">
+              <span class="line"><span class="reveal">nói</span></span>
+              <span class="line"><span class="reveal">việc</span></span>
+              <span class="line"><span class="reveal">cần</span></span>
+              <span class="line"><span class="reveal">làm.</span></span>
+            </h1>
+            <p class="blank-sub reveal">không cấu hình, không tài khoản, không telemetry. chạy trên máy bạn.</p>
+            <div class="blank-chips">
+              <button class="chip" type="button" data-prompt="Đọc repo này và tóm tắt kiến trúc trong 10 dòng.">tóm tắt repo</button>
+              <button class="chip" type="button" data-prompt="Tìm lỗi trong repo, sửa và chạy kiểm tra phù hợp.">sửa lỗi</button>
+              <button class="chip" type="button" data-prompt="Review git diff hiện tại và chỉ ra rủi ro.">review diff</button>
             </div>
           </div>
         </div>
 
         <form class="composer" id="form">
-          <textarea id="prompt" rows="3" placeholder="Nhập yêu cầu… (Ctrl+Enter để gửi)"></textarea>
-          <div class="composer-actions">
-            <span class="counter" id="counter">0</span>
-            <button type="button" id="stop" hidden>Stop</button>
-            <button type="submit" id="send">Send</button>
+          <label class="sr-only" for="prompt">việc cần làm</label>
+          <div class="composer-box">
+            <textarea id="prompt" rows="1" placeholder="việc cần làm…"></textarea>
+            <div class="composer-row">
+              <span class="composer-hint" aria-hidden="true">
+                <kbd>ctrl</kbd><span class="hint-plus">+</span><kbd>↵</kbd><span class="hint-text">gửi</span>
+              </span>
+              <span class="composer-count" id="counter" aria-hidden="true">0</span>
+              <button type="button" class="ghost" id="stop" hidden>dừng</button>
+              <button type="submit" class="primary" id="send">gửi</button>
+            </div>
           </div>
         </form>
       </main>

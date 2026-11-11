@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "model": "ui-check-stub",
+  "turns": [
+    {
+      "text": [
+        "UI-CHECK-STUB-OK: transcript renders the stub turn.",
+        "\n\n",
+        "The desktop shell streamed this reply from `goon --json` over SSE.",
+        "\nno model, no tokens, no network."
+      ],
+      "usage": { "inputTokens": 12, "outputTokens": 8, "totalTokens": 20 }
+    }
+  ]
+}

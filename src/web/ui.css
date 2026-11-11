@@ -1,430 +1,1440 @@
+/* ============================================================================
+   goon desktop — flat, minimal, motion-first.
+
+   House rules
+   - solid fills only: no gradients, no blur, no glass, no drop shadows.
+   - structure comes from 1px hairlines and whitespace, never from elevation.
+   - one accent, used for exactly three things: state, focus, and the caret.
+   - every duration and curve lives in a token; components never invent one.
+   - light mode is a designed palette, not an inversion.
+
+   ui.js contract (do not break): it fills .letters with .letter spans and sets
+   --i (index in word) and --base (ms offset per word) on each one, toggles
+   .is-in / .is-out / .is-hidden, and appends .caret to the streaming turn.
+   ========================================================================= */
+
 :root {
-  color-scheme: light dark;
-  --bg: #0e1116;
-  --panel: #151a21;
-  --panel-2: #1b222b;
-  --text: #e6edf3;
-  --muted: #8b98a5;
-  --line: #232c36;
-  --accent: #6ee7b7;
-  --warn: #fbbf24;
-  --bad: #f87171;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, system-ui, sans-serif;
+  color-scheme: dark;
+
+  /* ---------------------------------------------------------------- palette */
+  --bg: #0a0b0c;
+  --surface: #0f1112;
+  --surface-2: #15181a;
+  --ink: #f4f6f7;
+  --ink-2: #b6bec3;
+  --ink-3: #78828a; /* lowest text tone, 5.0:1 on --bg */
+  --line: #1e2224;
+  --line-2: #2b3134;
+  --line-3: #5b646a; /* 3.3:1 — control outlines must be identifiable */
+  --accent: #d7ff3e;
+  --accent-2: #e6ff7a;
+  --accent-ink: #0a0b0c;
+  --bad: #ff5c5c;
+  --warn: #ffb648;
+
+  /* ----------------------------------------------------------- motion tokens */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-snap: cubic-bezier(0.2, 0.9, 0.1, 1);
+  --ease-line: cubic-bezier(0.33, 1, 0.68, 1);
+
+  --t-1: 90ms; /* micro: hover, active */
+  --t-2: 180ms; /* exits, button transitions */
+  --t-3: 280ms; /* small entrances */
+  --t-4: 440ms; /* reveals, shell */
+  --t-5: 560ms; /* letter rise, rule draw */
+  --t-6: 640ms; /* long draw */
+
+  --stagger: 28ms; /* per-letter cadence inside a word */
+  --stagger-beat: 18ms; /* swing applied from the 4th letter on */
+  --stagger-swing: 44ms; /* stronger hold from the 6th letter on */
+
+  /* intro score: letters land ~990ms, the rule and meta hit their marks, and the
+     accent run in the rule burns out at exactly 1900ms — which is the moment
+     ui.js hands the stage to the shell. One rest, then the shell. */
+  --intro-rule-at: 760ms;
+  --intro-meta-at: 1020ms;
+  --intro-skip-at: 1240ms;
+  --intro-rest-at: 1320ms;
+  --intro-rest: 580ms;
+  --rule-w: min(420px, 54vw);
+  --rule-run: 72px;
+
+  /* ambient loops */
+  --pulse: 1.2s;
+  --caret-blink: 1.05s;
+
+  /* idle reveal cadence */
+  --reveal-base: 80ms;
+  --reveal-step: 58ms;
+
+  /* ------------------------------------------------------------------ type */
+  --sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, Inter, "Noto Sans", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --sans-display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, Inter, "Noto Sans", system-ui, "Helvetica Neue", Arial, sans-serif;
+  --mono: "Cascadia Mono", "Cascadia Code", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", "Segoe UI", monospace;
+
+  /* ---------------------------------------------------------------- layout */
+  --rail: 244px;
+  --gutter: 26px;
+  --col: 940px;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #f7f8fa;
-    --panel: #ffffff;
-    --panel-2: #f1f3f6;
-    --text: #12161c;
-    --muted: #5b6672;
-    --line: #e2e6eb;
-    --accent: #0f9d70;
-    --warn: #b45309;
-    --bad: #b91c1c;
-  }
-}
+/* --------------------------------------------------------------- base reset */
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 html,
 body {
-  margin: 0;
   height: 100%;
+}
+
+body {
+  margin: 0;
   background: var(--bg);
-  color: var(--text);
+  color: var(--ink);
   font-family: var(--sans);
   font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
 }
+
+button,
+textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* scrollbars: hairline, same flat language as the rest */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line-2);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-3);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ui.js pins a warning strip over the top of the viewport when the CLI is not
+   answering; reserve its height so the bar and the rail keep their place. */
+body:has(.gx-banner.is-on) .shell {
+  padding-top: 30px;
+}
+
+/* ------------------------------------------------------------------ intro */
+
+.intro {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.intro.is-out {
+  animation: intro-out var(--t-2) var(--ease-snap) forwards;
+  pointer-events: none;
+}
+
+/* exits inside 180ms because ui.js drops the node at 220ms */
+@keyframes intro-out {
+  to {
+    opacity: 0;
+  }
+}
+
+.intro-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.kinetic {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.22em;
+  font-family: var(--sans-display);
+  font-size: clamp(46px, 8.4vw, 112px);
+  font-weight: 600;
+  line-height: 0.92;
+  letter-spacing: -0.045em;
+}
+
+.kinetic .word {
+  display: inline-flex;
+}
+
+/* the mask is the reveal: the glyph is clipped at the box edge and rises into
+   place, so there is no fade to fight the type */
+.kinetic .mask {
+  display: block;
+  overflow: hidden;
+  padding: 0.2em 0.06em 0.26em;
+  margin: -0.2em -0.06em -0.26em;
+}
+
+.kinetic .letters {
+  display: flex;
+}
+
+.kinetic .letter {
+  display: block;
+  animation: letter-rise var(--t-5) var(--ease-out) both;
+  animation-delay: calc(var(--base, 0ms) + var(--i, 0) * var(--stagger) + var(--beat, 0ms));
+  will-change: transform;
+}
+
+/* uneven cadence: the beat widens late in a word instead of ticking evenly */
+.kinetic .letters > .letter:nth-child(n + 4) {
+  --beat: var(--stagger-beat);
+}
+
+.kinetic .letters > .letter:nth-child(n + 6) {
+  --beat: var(--stagger-swing);
+}
+
+/* 160% clears the mask padding on both sides, so the glyph is fully hidden
+   before it starts to rise */
+@keyframes letter-rise {
+  from {
+    transform: translate3d(0, 160%, 0) rotate(2.4deg);
+  }
+  to {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+}
+
+.kinetic .word:last-child .letter {
+  color: var(--ink-3);
+}
+
+.intro-rule {
+  position: relative;
+  width: var(--rule-w);
+  height: 1px;
+  margin-top: 28px;
+  background: var(--line-3);
+  animation: rule-draw var(--t-5) var(--ease-line) both;
+  animation-delay: var(--intro-rule-at);
+}
+
+@keyframes rule-draw {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+/* the accent runs the rule once and parks: the visual "breathe before the app" */
+.intro-rule-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--rule-run);
+  background: var(--accent);
+  transform: translateX(0);
+  animation: rule-run var(--intro-rest) var(--ease-line) both;
+  animation-delay: var(--intro-rest-at);
+}
+
+@keyframes rule-run {
+  from {
+    transform: translateX(calc(var(--rule-run) * -1));
+  }
+  to {
+    transform: translateX(calc(var(--rule-w) - var(--rule-run)));
+  }
+}
+
+.intro-meta {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-top: 18px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  animation: meta-in var(--t-3) var(--ease-out) both;
+  animation-delay: var(--intro-meta-at);
+}
+
+.intro-meta .meta-sep {
+  width: 3px;
+  height: 3px;
+  background: var(--line-2);
+}
+
+@keyframes meta-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.intro-skip {
+  position: absolute;
+  right: 0;
+  bottom: 26px;
+  left: 0;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  animation: meta-in var(--t-3) var(--ease-out) both;
+  animation-delay: var(--intro-skip-at);
+}
+
+/* ------------------------------------------------------------------ shell */
 
 .shell {
   display: grid;
-  grid-template-columns: 248px 1fr;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
   height: 100vh;
-  overflow: hidden;
+  height: 100dvh;
+  opacity: 0;
 }
 
-.sidebar {
-  background: var(--panel);
-  border-right: 1px solid var(--line);
+.shell.is-hidden {
+  display: none;
+}
+
+.shell.is-in {
+  animation: shell-in var(--t-4) var(--ease-out) both;
+}
+
+@keyframes shell-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* rail: flat panel, hairline separated, no elevation */
+.rail {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px 14px;
+  gap: 16px;
+  min-height: 0;
+  padding: 18px 16px 16px;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
   overflow: hidden;
 }
 
-.brand {
+.rail-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-weight: 650;
-  letter-spacing: 0.2px;
+  gap: 9px;
 }
 
-.brand .dot {
+.mark {
+  flex: none;
   width: 9px;
   height: 9px;
-  border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-.brand .tag {
-  font-weight: 500;
-  color: var(--muted);
-  font-size: 12px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 1px 7px;
+.rail-name {
+  font-family: var(--sans-display);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.meta {
-  font-size: 12px;
-  color: var(--muted);
-  line-height: 1.45;
-  word-break: break-word;
-}
-
-.section-title {
-  font-size: 11px;
+.rail-tag {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--muted);
-  margin-top: 6px;
+  color: var(--ink-3);
 }
 
-.sessions {
+.rail-meta {
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.65;
+  color: var(--ink-3);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.rail-label {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.rail-sessions {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  overflow-y: auto;
+  gap: 1px;
   min-height: 0;
+  margin: 0 -8px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .session {
-  padding: 7px 9px;
-  border-radius: 8px;
-  border: 1px solid transparent;
-  cursor: default;
-  font-size: 12px;
-  color: var(--muted);
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.session:hover {
-  background: var(--panel-2);
-  border-color: var(--line);
-  color: var(--text);
-}
-
-.session .id {
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
-.spacer {
-  flex: 1;
-}
-
-.hint {
-  font-size: 11px;
-  color: var(--muted);
-  line-height: 1.5;
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
-}
-
-.main {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 18px;
-  border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 70%, transparent);
-  backdrop-filter: blur(8px);
-}
-
-.cwd {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.status {
-  font-size: 12px;
-  padding: 2px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  color: var(--muted);
-}
-
-.status.running {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
-}
-
-.transcript {
-  overflow-y: auto;
-  padding: 22px 22px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.empty {
-  margin: auto;
-  text-align: center;
-  max-width: 520px;
-}
-
-.empty h1 {
-  font-size: 26px;
-  margin: 0 0 6px;
-  letter-spacing: -0.4px;
-}
-
-.empty p {
-  color: var(--muted);
-  margin: 0 0 16px;
-}
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
   gap: 8px;
-  justify-content: center;
-}
-
-.chip {
-  background: var(--panel);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 7px 12px;
+  padding: 7px 8px;
+  border-left: 1px solid transparent;
+  color: var(--ink-2);
   font-size: 12px;
-  cursor: pointer;
+  line-height: 1.35;
+  transition:
+    color var(--t-1) var(--ease-snap),
+    border-color var(--t-1) var(--ease-snap),
+    background-color var(--t-1) var(--ease-snap);
 }
 
-.chip:hover {
-  border-color: var(--accent);
-}
-
-.bubble {
-  max-width: 900px;
-  border-radius: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--line);
-  background: var(--panel);
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.55;
-}
-
-.bubble.user {
-  align-self: flex-end;
-  background: var(--panel-2);
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-  max-width: 720px;
-}
-
-.bubble.assistant {
-  align-self: flex-start;
-}
-
-.bubble.error {
-  border-color: color-mix(in srgb, var(--bad) 55%, var(--line));
-  color: var(--bad);
-}
-
-.event {
-  align-self: flex-start;
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-  padding: 2px 4px;
-}
-
-.event .tool {
-  color: var(--text);
-}
-
-.event .ok {
-  color: var(--accent);
-}
-
-.event .bad {
-  color: var(--bad);
-}
-
-.event .warn {
-  color: var(--warn);
-}
-
-details.panel {
-  align-self: flex-start;
-  max-width: 900px;
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-}
-
-details.panel summary {
-  cursor: pointer;
-}
-
-details.panel pre {
-  margin: 6px 0 0;
-  padding: 10px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  overflow-x: auto;
-  max-height: 320px;
-}
-
-.composer {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 18px 16px;
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-}
-
-.composer textarea {
-  resize: vertical;
-  min-height: 60px;
-  max-height: 220px;
-  padding: 11px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--sans);
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-.composer textarea:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.composer-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.counter {
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
-  margin-right: auto;
-}
-
-#send {
-  background: var(--accent);
-  color: #06251b;
-  border: 0;
-  border-radius: 9px;
-  padding: 9px 18px;
-  font-weight: 650;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-#stop {
-  background: transparent;
-  color: var(--bad);
-  border: 1px solid color-mix(in srgb, var(--bad) 50%, var(--line));
-  border-radius: 9px;
-  padding: 8px 16px;
-  font-weight: 600;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-#stop:hover {
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
-}
-
-.bubble.assistant code {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  padding: 1px 4px;
-}
-
-.bubble.assistant pre {
-  font-family: var(--mono);
-  font-size: 12.5px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 12px;
-  overflow-x: auto;
-  margin: 8px 0;
-  white-space: pre;
-}
-
-.bubble.assistant strong {
-  font-weight: 650;
+.session:hover,
+.session:focus-within {
+  color: var(--ink);
+  background: var(--surface-2);
+  border-left-color: var(--accent);
 }
 
 .session .wrap {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
 }
 
-.session .sub {
-  font-size: 10.5px;
-  opacity: 0.75;
+.session .title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session button.copy {
-  background: transparent;
-  border: 1px solid var(--line);
-  color: var(--muted);
-  border-radius: 6px;
-  font-size: 10px;
-  padding: 2px 6px;
-  cursor: pointer;
-  align-self: center;
+.session .sub {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  color: var(--ink-3);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.session button.copy:hover {
-  color: var(--text);
+.session .copy {
+  flex: none;
+  margin-left: auto;
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color var(--t-1) var(--ease-snap);
+}
+
+.session .copy:hover {
+  color: var(--accent);
+}
+
+.rail-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+/* ------------------------------------------------------------------- stage */
+
+.stage {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.bar,
+.scroll,
+.composer {
+  padding-right: var(--gutter);
+  padding-left: var(--gutter);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 46px;
+  border-bottom: 1px solid var(--line);
+}
+
+.bar-cwd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.bar-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  transition: color var(--t-2) var(--ease-out);
+}
+
+/* the square marks the state in both moods; only running earns the accent */
+.bar-status::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  background: var(--line-2);
+  transition: background-color var(--t-2) var(--ease-out);
+}
+
+.bar-status[data-state="running"] {
+  color: var(--accent);
+}
+
+.bar-status[data-state="running"]::before {
+  background: var(--accent);
+  animation: pulse var(--pulse) var(--ease-in-out) infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* -------------------------------------------------------------- transcript */
+
+.scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding-top: 30px;
+  padding-bottom: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-padding-block: 20px;
+}
+
+/* the reading column is centred on wide windows and the composer/bar share it,
+   so the whole stage sits on one vertical axis */
+@media (min-width: 1080px) {
+  .bar,
+  .scroll,
+  .composer {
+    padding-right: max(var(--gutter), calc((100% - var(--col)) / 2));
+    padding-left: max(var(--gutter), calc((100% - var(--col)) / 2));
+  }
+}
+
+.turn {
+  max-width: 78ch;
+  animation: turn-in var(--t-3) var(--ease-out) both;
+}
+
+@keyframes turn-in {
+  from {
+    opacity: 0;
+    transform: translateY(9px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.turn.user {
+  align-self: flex-end;
+  max-width: 62ch;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-right: 2px solid var(--accent);
+  color: var(--ink);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.turn.assistant {
+  align-self: flex-start;
+  color: var(--ink);
+  line-height: 1.66;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.turn.assistant code {
+  padding: 1px 5px;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.turn.assistant pre {
+  margin: 10px 0;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.turn.assistant strong {
+  font-weight: 600;
+}
+
+.turn.error {
+  align-self: flex-start;
+  max-width: 78ch;
+  padding-left: 12px;
+  border-left: 2px solid var(--bad);
+  color: var(--bad);
+  line-height: 1.6;
+}
+
+/* tool and event rows: one hairline, no boxes */
+.row {
+  align-self: flex-start;
+  max-width: 78ch;
+  padding: 2px 0 2px 13px;
+  border-left: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  overflow-wrap: anywhere;
+  animation: row-in var(--t-2) var(--ease-out) both;
+}
+
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.row .tool {
+  color: var(--ink-2);
+}
+
+.row .ok {
+  color: var(--accent);
+}
+
+.row .bad {
+  color: var(--bad);
+}
+
+.row .warn {
+  color: var(--warn);
+}
+
+.row .arg {
+  color: var(--ink-3);
+}
+
+details.panel {
+  align-self: flex-start;
+  max-width: 78ch;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink-3);
+  animation: row-in var(--t-2) var(--ease-out) both;
+}
+
+details.panel summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0 2px 13px;
+  border-left: 1px solid var(--line);
+  color: var(--ink-3);
+  list-style: none;
+  cursor: pointer;
+  transition: color var(--t-1) var(--ease-snap);
+}
+
+details.panel summary:hover {
+  color: var(--ink-2);
+}
+
+details.panel summary::-webkit-details-marker {
+  display: none;
+}
+
+details.panel summary::before {
+  content: "+";
+  flex: none;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+details.panel[open] summary::before {
+  content: "−";
+}
+
+details.panel pre {
+  margin: 8px 0 8px 13px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  overflow: auto;
+  max-height: 320px;
+  white-space: pre;
+  tab-size: 2;
+}
+
+/* ui.js hangs a copy button inside the first pre; keep the code off it */
+.turn.assistant pre:has(> .gx-copy),
+details.panel pre:has(> .gx-copy) {
+  padding-right: 46px;
+}
+
+/* streaming caret: a solid accent bar, hard blink, no easing */
+.caret {
+  display: inline-block;
+  width: 0.52ch;
+  min-width: 6px;
+  height: 1.12em;
+  margin-left: 2px;
+  background: var(--accent);
+  vertical-align: -0.16em;
+  animation: caret-blink var(--caret-blink) steps(1, end) infinite;
+}
+
+@keyframes caret-blink {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  56%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ------------------------------------------------------------------- idle */
+
+.blank {
+  margin: auto;
+  width: 100%;
+  max-width: 560px;
+  /* The idle screen is a composition, not a document: centre it so the type sits on the same
+     axis as the transcript column instead of hanging off the left edge. */
+  align-items: center;
+  text-align: center;
+}
+
+.blank.is-out {
+  animation: blank-out var(--t-2) var(--ease-snap) forwards;
+}
+
+@keyframes blank-out {
+  to {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+}
+
+.blank-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  animation: meta-in var(--t-3) var(--ease-out) both;
+}
+
+.blank-dot {
+  flex: none;
+  width: 3px;
+  height: 3px;
+  background: var(--accent);
+}
+
+/* the hairline draws out of the kicker: the same gesture as the intro rule */
+.blank-rule {
+  flex: 1 1 auto;
+  height: 1px;
+  margin-left: 6px;
+  background: var(--line-2);
+  transform-origin: left center;
+  animation: rule-grow var(--t-6) var(--ease-line) both;
+  animation-delay: var(--reveal-base);
+}
+
+@keyframes rule-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.blank-title {
+  margin: 0 0 18px;
+  font-family: var(--sans-display);
+  font-size: clamp(34px, 4.6vw, 52px);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.045em;
+}
+
+/* masked line reveal, one word per mask, cadence from --reveal-step */
+.blank-title .line {
+  display: inline-flex;
+  overflow: hidden;
+  padding: 0.08em 0.02em 0.2em;
+  margin: -0.08em -0.02em -0.2em;
+  vertical-align: bottom;
+}
+
+.blank-title .reveal {
+  display: inline-block;
+  animation: line-rise var(--t-5) var(--ease-out) both;
+  animation-delay: var(--reveal-base);
+}
+
+.blank-title .line:nth-child(2) .reveal {
+  animation-delay: calc(var(--reveal-base) + var(--reveal-step));
+}
+
+.blank-title .line:nth-child(3) .reveal {
+  animation-delay: calc(var(--reveal-base) + var(--reveal-step) * 2);
+}
+
+.blank-title .line:nth-child(4) .reveal {
+  animation-delay: calc(var(--reveal-base) + var(--reveal-step) * 3);
+}
+
+@keyframes line-rise {
+  from {
+    transform: translate3d(0, 150%, 0);
+  }
+  to {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+.reveal {
+  animation: reveal-up var(--t-4) var(--ease-out) both;
+  animation-delay: var(--reveal-base);
+}
+
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.blank-sub {
+  margin: 0 0 26px;
+  max-width: 100%;
+  color: var(--ink-2);
+  line-height: 1.62;
+  text-wrap: pretty;
+  animation-delay: calc(var(--reveal-base) + var(--reveal-step) * 4);
+}
+
+.blank-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  animation: reveal-up var(--t-4) var(--ease-out) both;
+  animation-delay: calc(var(--reveal-base) + var(--reveal-step) * 5);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-3);
+  background: none;
+  color: var(--ink-2);
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    color var(--t-1) var(--ease-snap),
+    border-color var(--t-1) var(--ease-snap),
+    background-color var(--t-1) var(--ease-snap),
+    transform var(--t-1) var(--ease-snap);
+}
+
+/* the dot is the only colour a chip ever gets */
+.chip::before {
+  content: "";
+  flex: none;
+  width: 3px;
+  height: 3px;
+  background: var(--line-2);
+  transition: background-color var(--t-1) var(--ease-snap);
+}
+
+.chip:hover {
+  color: var(--ink);
+  border-color: var(--ink-3);
+  background: var(--surface-2);
+}
+
+.chip:hover::before {
+  background: var(--accent);
+}
+
+.chip:active {
+  transform: translateY(1px);
+}
+
+/* --------------------------------------------------------------- composer */
+
+.composer {
+  padding-top: 12px;
+  padding-bottom: 18px;
+}
+
+.composer-box {
+  background: var(--surface);
+  border: 1px solid var(--line-3);
+  transition: border-color var(--t-2) var(--ease-out);
+}
+
+/* keyboard focus reads on the box, the textarea's caret carries the inside */
+.composer-box:focus-within {
   border-color: var(--accent);
 }
 
-#send:disabled {
-  opacity: 0.5;
+.composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 42px;
+  max-height: 200px;
+  margin: 0;
+  padding: 12px 14px 6px;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  caret-color: var(--accent);
+  resize: none;
+  outline: none;
+}
+
+.composer textarea:focus-visible {
+  outline: none;
+}
+
+.composer textarea::placeholder {
+  color: var(--ink-3);
+}
+
+.composer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 7px 10px 8px 13px;
+  border-top: 1px solid var(--line);
+}
+
+/* ui.js appends ctrl+k / ctrl+f hints here, so the row has to give */
+.composer-hint {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 5px;
+  min-width: 0;
+  margin-right: auto;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+
+.composer-hint .hint-text {
+  margin-left: 3px;
+}
+
+kbd {
+  padding: 1px 5px;
+  border: 1px solid var(--line-2);
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
+.composer-count {
+  min-width: 2ch;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+  text-align: right;
+}
+
+.primary,
+.ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 15px;
+  border: 1px solid transparent;
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background-color var(--t-1) var(--ease-snap),
+    color var(--t-1) var(--ease-snap),
+    border-color var(--t-1) var(--ease-snap),
+    transform var(--t-1) var(--ease-snap);
+}
+
+.primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.primary:hover {
+  background: var(--accent-2);
+}
+
+.primary:active {
+  transform: translateY(1px);
+}
+
+.primary:disabled {
+  background: var(--surface-2);
+  border-color: var(--line);
+  color: var(--ink-3);
   cursor: default;
+}
+
+.ghost {
+  background: none;
+  border-color: var(--line-3);
+  color: var(--ink-2);
+}
+
+.ghost:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.ghost:active {
+  transform: translateY(1px);
+}
+
+/* ------------------------------------------------------------ light mode */
+
+/* Designed, not inverted: warm paper and a deep green accent, with the rail as
+   the darker plane and cards as the lighter one. */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --bg: #f6f6f3;
+    --surface: #ffffff;
+    --surface-2: #eeefec;
+    --ink: #0c0e0d;
+    --ink-2: #414746;
+    --ink-3: #646a68; /* 5.1:1 on --bg, 4.8:1 on the rail */
+    --line: #e1e2de;
+    --line-2: #cbcdc8;
+    --line-3: #898e89; /* 3.1:1 on --bg */
+    --accent: #146c43; /* 6.0:1 as text, 6.5:1 under --accent-ink */
+    --accent-2: #0f5635;
+    --accent-ink: #ffffff;
+    --bad: #b3251f;
+    --warn: #8a5410;
+  }
+
+  .rail {
+    background: var(--surface-2);
+  }
+
+  .intro,
+  .composer {
+    background: var(--bg);
+  }
+
+  .turn.user {
+    background: var(--surface);
+  }
+
+  .turn.assistant pre,
+  details.panel pre {
+    background: var(--surface);
+  }
+
+  .composer-box {
+    background: var(--surface);
+  }
+
+  /* --warn is a dark ochre in this palette, so the surfaces ui.js paints with
+     it need light ink instead of its hard-coded near-black */
+  body .gx-banner,
+  body mark.gx-hit {
+    color: #ffffff;
+  }
+
+  body .gx-banner button {
+    border-color: rgba(255, 255, 255, 0.45);
+    color: #ffffff;
+  }
+}
+
+/* --------------------------------------------------------- reduced motion */
+
+/* No kinetic run, no slides. Final states are forced so nothing is left
+   invisible by a skipped animation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+  }
+
+  .kinetic .letter,
+  .blank-title .reveal,
+  .reveal,
+  .intro-meta,
+  .intro-skip,
+  .blank-chips,
+  .shell.is-in {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .intro-rule {
+    clip-path: none !important;
+  }
+
+  .intro-rule-fill {
+    display: none;
+  }
+
+  .caret,
+  .bar-status[data-state="running"]::before {
+    animation: none !important;
+    opacity: 1;
+  }
+}
+
+/* ------------------------------------------------------------- responsive */
+
+/* 1180 and below: the rail gives width back to the reading column */
+@media (max-width: 1180px) {
+  :root {
+    --rail: 212px;
+    --gutter: 22px;
+  }
+}
+
+/* 1000 and below: rail is a slim index, fine print drops out first */
+@media (max-width: 1000px) {
+  :root {
+    --rail: 196px;
+    --gutter: 20px;
+  }
+
+  .rail {
+    padding: 16px 13px 14px;
+    gap: 14px;
+  }
+
+  .rail-foot {
+    display: none;
+  }
+
+  .session {
+    padding: 6px 7px;
+  }
+}
+
+/* 860 and below: the rail becomes a top strip instead of disappearing */
+@media (max-width: 860px) {
+  :root {
+    --rail: 0px;
+    --gutter: 16px;
+  }
+
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .rail {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .rail-brand {
+    flex: none;
+  }
+
+  .rail-tag,
+  .rail-label,
+  .rail-foot {
+    display: none;
+  }
+
+  .rail-meta {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .rail-sessions {
+    flex: 1 1 auto;
+    flex-direction: row;
+    gap: 2px;
+    max-width: 42%;
+    margin: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .session {
+    flex: none;
+    border-left: 0;
+    border-bottom: 1px solid transparent;
+    white-space: nowrap;
+  }
+
+  .session:hover,
+  .session:focus-within {
+    border-left-color: transparent;
+    border-bottom-color: var(--accent);
+  }
+
+  .session .wrap {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .session .sub,
+  .session .copy {
+    display: none;
+  }
+
+  .bar {
+    height: 42px;
+  }
+
+  .scroll {
+    padding-top: 24px;
+  }
+
+  .blank {
+    max-width: 100%;
+  }
+
+  .blank-title {
+    font-size: clamp(30px, 7vw, 40px);
+  }
+
+  .composer {
+    padding-top: 10px;
+    padding-bottom: 14px;
+  }
+}
+
+/* short windows (900x600 class): tighten the vertical score, not the type */
+@media (max-height: 700px) {
+  .kinetic {
+    font-size: clamp(40px, 7.4vw, 78px);
+  }
+
+  .intro-rule {
+    margin-top: 22px;
+  }
+
+  .intro-skip {
+    bottom: 18px;
+  }
+
+  .scroll {
+    padding-top: 20px;
+    padding-bottom: 8px;
+  }
+
+  .blank-line {
+    margin-bottom: 16px;
+  }
+
+  .blank-title {
+    margin-bottom: 14px;
+    font-size: clamp(32px, 5vw, 44px);
+  }
+
+  .blank-sub {
+    margin-bottom: 18px;
+  }
+
+  .composer {
+    padding-bottom: 12px;
+  }
+
+  .composer textarea {
+    min-height: 38px;
+  }
+}
+
+/* Windows high contrast: keep every hairline and mark visible */
+@media (forced-colors: active) {
+  .mark,
+  .blank-dot,
+  .caret,
+  .bar-status::before,
+  .chip::before,
+  .intro-rule-fill {
+    forced-color-adjust: none;
+    background: CanvasText;
+  }
+
+  .primary,
+  .ghost,
+  .chip,
+  .composer-box,
+  kbd {
+    border: 1px solid ButtonText;
+  }
+
+  .session:hover,
+  .session:focus-within {
+    outline: 1px solid CanvasText;
+  }
 }
