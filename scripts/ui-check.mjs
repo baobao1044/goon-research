@@ -1310,6 +1310,70 @@ async function main() {
       });
     }
 
+    // ---------------------------------------------------------------- prompt round-trip (API only)
+    // These run before the browser phase on purpose: a full browser pass takes tens of seconds, and
+    // a rebuild/taskkill from a parallel shell can kill the server in the middle of it. The API
+    // checks are cheap, so getting them done first keeps an interrupted run informative.
+    let sawRun = false;
+    if (!serverSurface.rewritten) {
+      skip('POST /api/prompt streams SSE with a stub run', REBUILD_HINT);
+      skip('/api/sessions/:id/events returns a session log', REBUILD_HINT);
+      skip('second concurrent prompt is 409', REBUILD_HINT);
+    } else {
+      await check('POST /api/prompt streams SSE with a stub run', async () => {
+        requireServer('/api/prompt');
+        const response = await request(`${baseUrl}/api/prompt`, { method: 'POST', body: JSON.stringify({ prompt: 'ui-check stub run' }), headers: { 'content-type': 'application/json' }, timeout: options.timeout * 2 });
+        if (response.status !== 200) fail(`POST /api/prompt returned ${response.status}`);
+        if (!contentType(response).includes('text/event-stream')) fail(`content-type is ${contentType(response) || '(missing)'}`);
+        const text = response.body.toString('utf8');
+        const frames = text.split('\n\n').filter(chunk => chunk.startsWith('data: '));
+        if (frames.length === 0) fail('the stream carried no data frames');
+        const events = frames.map(frame => JSON.parse(frame.slice(6)));
+        if (!events.some(event => event.type === 'done')) fail('the stream has no done event');
+        if (!events.some(event => event.type === 'exit')) fail('the stream has no exit terminator');
+        if (!text.includes(STUB_MARKER)) fail(`the stream never carried the stub reply (${STUB_MARKER})`);
+        sawRun = true;
+        detail(`events: ${events.map(event => event.type).join(',')}`);
+        return `${frames.length} frames, done + exit, stub reply present`;
+      });
+
+      await check('/api/sessions/:id/events returns a session log', async () => {
+        requireServer('/api/sessions/:id/events');
+        const list = jsonBody(await requestOk(`${baseUrl}/api/sessions`), '/api/sessions');
+        const session = Array.isArray(list) ? list.find(entry => typeof entry?.id === 'string' && entry.id) : null;
+        if (!session) fail(sawRun ? 'a run happened but no session was recorded' : 'no session was recorded, so the event log route cannot be checked');
+        const response = await requestOk(`${baseUrl}/api/sessions/${session.id}/events?limit=5`);
+        const payload = jsonBody(response, 'events');
+        if (payload.id !== session.id) fail(`payload id ${payload.id} does not match ${session.id}`);
+        if (!Array.isArray(payload.events)) fail('events is not an array');
+        if (typeof payload.truncated !== 'boolean') fail('truncated is not a boolean');
+        if (payload.events.length > 5) fail(`limit=5 returned ${payload.events.length} events`);
+        const bad = await request(`${baseUrl}/api/sessions/..%2F..%2Fetc/events`);
+        if (bad.status !== 400) fail(`a traversal-shaped session id got ${bad.status} (expected 400)`);
+        const missing = await request(`${baseUrl}/api/sessions/deadbeef/events`);
+        if (missing.status !== 404) fail(`an unknown session id got ${missing.status} (expected 404)`);
+        return `${payload.events.length} event(s), traversal 400, unknown 404`;
+      });
+
+      await check('second concurrent prompt is 409', async () => {
+        requireServer('concurrent prompt');
+        const url = `${baseUrl}/api/prompt`;
+        const headers = { 'content-type': 'application/json' };
+        const first = await requestStream(url, { method: 'POST', body: JSON.stringify({ prompt: 'ui-check concurrency keep-alive' }), headers });
+        try {
+          if (first.status !== 200) fail(`the first prompt returned ${first.status}`);
+          // The response head means the server already incremented its run counter.
+          const second = await request(url, { method: 'POST', body: JSON.stringify({ prompt: 'ui-check concurrency second' }), headers });
+          if (second.status !== 409) fail(`the second concurrent prompt got ${second.status} (expected 409)`);
+          jsonBody(second, '409 body');
+        } finally {
+          first.close();
+          await first.done.catch(() => {});
+        }
+        return 'first run streamed, second answered 409';
+      });
+    }
+
     // ---------------------------------------------------------------- browser
     if (!chromePath) {
       record('FAIL', 'chrome available', 'not found: install Chrome, set CHROME_PATH, or pass --chrome <path>');
@@ -1391,48 +1455,6 @@ async function main() {
       detail(`requests: ${[...new Set(network.requests)].map(url => url.replace(baseUrl, '')).join(' ')}`);
       return `${new Set(network.requests).size} unique URL(s), all same-origin`;
     });
-
-    // ---------------------------------------------------------------- API behaviour after runs
-    if (!serverSurface.rewritten) {
-      skip('/api/sessions/:id/events returns a session log', REBUILD_HINT);
-      skip('second concurrent prompt is 409', REBUILD_HINT);
-    } else {
-      await check('/api/sessions/:id/events returns a session log', async () => {
-        requireServer('/api/sessions/:id/events');
-        const list = jsonBody(await requestOk(`${baseUrl}/api/sessions`), '/api/sessions');
-        const session = Array.isArray(list) ? list.find(entry => typeof entry?.id === 'string' && entry.id) : null;
-        if (!session) fail('no session was recorded, so the event log route cannot be checked');
-        const response = await requestOk(`${baseUrl}/api/sessions/${session.id}/events?limit=5`);
-        const payload = jsonBody(response, 'events');
-        if (payload.id !== session.id) fail(`payload id ${payload.id} does not match ${session.id}`);
-        if (!Array.isArray(payload.events)) fail('events is not an array');
-        if (typeof payload.truncated !== 'boolean') fail('truncated is not a boolean');
-        if (payload.events.length > 5) fail(`limit=5 returned ${payload.events.length} events`);
-        const bad = await request(`${baseUrl}/api/sessions/..%2F..%2Fetc/events`);
-        if (bad.status !== 400) fail(`a traversal-shaped session id got ${bad.status} (expected 400)`);
-        const missing = await request(`${baseUrl}/api/sessions/deadbeef/events`);
-        if (missing.status !== 404) fail(`an unknown session id got ${missing.status} (expected 404)`);
-        return `${payload.events.length} event(s), traversal 400, unknown 404`;
-      });
-
-      await check('second concurrent prompt is 409', async () => {
-        requireServer('concurrent prompt');
-        const url = `${baseUrl}/api/prompt`;
-        const headers = { 'content-type': 'application/json' };
-        const first = await requestStream(url, { method: 'POST', body: JSON.stringify({ prompt: 'ui-check concurrency keep-alive' }), headers });
-        try {
-          if (first.status !== 200) fail(`the first prompt returned ${first.status}`);
-          // The response head means the server already incremented its run counter.
-          const second = await request(url, { method: 'POST', body: JSON.stringify({ prompt: 'ui-check concurrency second' }), headers });
-          if (second.status !== 409) fail(`the second concurrent prompt got ${second.status} (expected 409)`);
-          jsonBody(second, '409 body');
-        } finally {
-          first.close();
-          await first.done.catch(() => {});
-        }
-        return 'first run streamed, second answered 409';
-      });
-    }
 
     // ---------------------------------------------------------------- baselines
     if (!options.shots) {

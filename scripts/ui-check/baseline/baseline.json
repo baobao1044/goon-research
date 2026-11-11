@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-11T10:24:15.130Z",
+  "generatedAt": "2026-11-11T10:38:04.137Z",
   "chrome": "Chrome/157.0.8103.51",
   "viewports": [
     "1280x860",
@@ -20,8 +20,8 @@
     },
     "idle": {
       "file": "idle.png",
-      "sha256": "21ece83fbfdf44a2b45a6b88ea5b3d6dbad573074db6b5b1845cdd3ca05cedc9",
-      "bytes": 38797,
+      "sha256": "95712425d1a3d96d3ba9518575188510dda9d20d599d3ea8da93059070fd0a6d",
+      "bytes": 45250,
       "width": 1280,
       "height": 860,
       "maskedRegions": [
@@ -35,14 +35,20 @@
           "x": 6,
           "y": 146,
           "width": 231,
-          "height": 35
+          "height": 49
+        },
+        {
+          "x": 6,
+          "y": 192,
+          "width": 231,
+          "height": 49
         }
       ]
     },
     "transcript": {
       "file": "transcript.png",
-      "sha256": "813af72de91b49c7fc4223a0ab65bf4ff54aaa32749886c63372a68750ef9dff",
-      "bytes": 37433,
+      "sha256": "d83afd81cc5d927fee2cfae2c121d21074d37704a416acbaa71363a1a65b1745",
+      "bytes": 44900,
       "width": 1280,
       "height": 860,
       "maskedRegions": [
@@ -55,6 +61,18 @@
         {
           "x": 6,
           "y": 146,
+          "width": 231,
+          "height": 49
+        },
+        {
+          "x": 6,
+          "y": 192,
+          "width": 231,
+          "height": 49
+        },
+        {
+          "x": 6,
+          "y": 238,
           "width": 231,
           "height": 49
         }
@@ -70,29 +88,8 @@
     },
     "idle-compact": {
       "file": "idle-compact.png",
-      "sha256": "6b42d6d10ad78f5a6a65b835505654c41fe05c9544dc70d91be8f235bd60a8fd",
-      "bytes": 34024,
-      "width": 900,
-      "height": 600,
-      "maskedRegions": [
-        {
-          "x": 214,
-          "y": 11,
-          "width": 616,
-          "height": 22
-        },
-        {
-          "x": 3,
-          "y": 138,
-          "width": 189,
-          "height": 47
-        }
-      ]
-    },
-    "transcript-compact": {
-      "file": "transcript-compact.png",
-      "sha256": "3b9077551dcf0c78f7fbd71d2c2440722b40838def99b7690f773205b795e96c",
-      "bytes": 34785,
+      "sha256": "2fad1065fd29bdd2c492bcc03c30914ecd78b947ac3b27a5ef0d452fbfa97356",
+      "bytes": 41056,
       "width": 900,
       "height": 600,
       "maskedRegions": [
@@ -111,6 +108,51 @@
         {
           "x": 3,
           "y": 182,
+          "width": 189,
+          "height": 47
+        },
+        {
+          "x": 3,
+          "y": 226,
+          "width": 189,
+          "height": 47
+        }
+      ]
+    },
+    "transcript-compact": {
+      "file": "transcript-compact.png",
+      "sha256": "b0fa9b97d73c957e48ba261e62a4db4833dd902de439d7f450cd48182e928eeb",
+      "bytes": 41744,
+      "width": 900,
+      "height": 600,
+      "maskedRegions": [
+        {
+          "x": 214,
+          "y": 11,
+          "width": 616,
+          "height": 22
+        },
+        {
+          "x": 3,
+          "y": 138,
+          "width": 189,
+          "height": 47
+        },
+        {
+          "x": 3,
+          "y": 182,
+          "width": 189,
+          "height": 47
+        },
+        {
+          "x": 3,
+          "y": 226,
+          "width": 189,
+          "height": 47
+        },
+        {
+          "x": 3,
+          "y": 270,
           "width": 189,
           "height": 47
         }

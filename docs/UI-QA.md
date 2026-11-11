@@ -56,6 +56,11 @@ These are gated on `GET /api/health`. Against a binary built before the server r
 reported as `SKIP` with a "run `cargo build --bin goon`" note, never as a failure, so an old binary
 does not produce false alarms.
 
+The API checks run **before** the browser phase (and the browser phase before the screenshots):
+a full browser pass takes tens of seconds, and a parallel `cargo build` / `taskkill /IM goon.exe`
+can kill the server in the middle of it. Cheap checks first means an interrupted run still produced
+useful evidence.
+
 | Check | Meaning |
 | --- | --- |
 | CSP on the document | `content-security-policy` on `/` contains `default-src 'none'`, `script-src 'self'`, `style-src 'self'`, `connect-src 'self'`, and no `unsafe-inline` / `unsafe-eval`. |
