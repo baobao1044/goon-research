@@ -77,6 +77,11 @@ impl Default for WebOptions {
 
 /// Starts the server and blocks until the process is killed.
 pub fn run(options: WebOptions) -> Result<()> {
+    // Fail before binding: a cwd that does not exist makes every later child spawn fail with a
+    // bare OS error (267 on Windows), which is far harder to diagnose than this message.
+    if !options.cwd.is_dir() {
+        bail!("goon web: --cwd is not a directory: {}", options.cwd.display());
+    }
     run_with(options, |_| {})
 }
 
@@ -114,7 +119,9 @@ pub fn run_with<F: FnOnce(&str)>(options: WebOptions, on_ready: F) -> Result<()>
                         // A client that walked away mid-response is normal; anything else is worth
                         // one line. Neither path ever includes a prompt or a response body.
                         if !is_disconnect_error(&error) {
-                            crate::cli::stderr_write(&format!("goon web: {error}\n"));
+                            // `{error:#}` keeps the anyhow chain: without it the log only shows the
+                            // outermost context and the actual cause (io error, exit status) is lost.
+                            crate::cli::stderr_write(&format!("goon web: {error:#}\n"));
                         }
                     }
                 });
@@ -433,7 +440,12 @@ fn log_request(method: &str, route: &str, status: u16) {
 fn is_io_disconnect(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
-        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::BrokenPipe
     )
 }
 

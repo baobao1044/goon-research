@@ -441,6 +441,14 @@ $outLog = Join-Path $logDir "desktop-$slug.out.log"
 $arguments = @('web', '--port', [string]$Port, '--cwd', $projectPath)
 if ($NoOpen) { $arguments += '--no-open' }
 
+# Start-Process joins an -ArgumentList array with spaces and does NOT quote the elements, so a
+# project path containing a space ("...\goon research\...") reached goon as a truncated argument
+# (it saw "--cwd C:\...\goon" and then a stray positional). Quote every element ourselves; the
+# embedded quotes are stripped by the standard Windows argument parser on the child side.
+$quotedArguments = @($arguments | ForEach-Object {
+    if ($_ -match '[\s"]') { '"{0}"' -f ($_ -replace '"', '\"') } else { $_ }
+}) -join ' '
+
 Write-GoonInfo "starting '$($resolved.path)' (found via $($resolved.source)) for '$projectPath'"
 
 $started = $null
@@ -449,7 +457,7 @@ try {
     # listening URL that `goon web` prints on stderr. Both streams go to the state directory so a
     # failed start can be diagnosed after the fact.
     $started = Start-Process -FilePath $resolved.path `
-        -ArgumentList $arguments `
+        -ArgumentList $quotedArguments `
         -WorkingDirectory $projectPath `
         -RedirectStandardError $errLog `
         -RedirectStandardOutput $outLog `

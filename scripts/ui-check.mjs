@@ -1437,6 +1437,10 @@ async function main() {
     // ---------------------------------------------------------------- baselines
     if (!options.shots) {
       skip('baseline comparison', 'screenshots disabled (--no-shots)');
+    } else if (serverExit) {
+      // A killed server leaves Chrome error pages behind; writing those as a baseline (or diffing
+      // against them) would be worse than useless.
+      skip('baseline comparison', `screenshots are not usable: the web server exited during the run (${serverExit})`);
     } else {
       for (const [state, captured] of Object.entries(shots)) {
         await check(`baseline ${state}`, () => compareOrUpdate(state, captured, options, chrome.version));
@@ -1455,11 +1459,11 @@ async function main() {
     if (options.keep && server && !serverExit) {
       keepServer = true;
       process.stdout.write(`\n  --keep: server left running at ${baseUrl}/ (pid ${server.pid}, logs in ${serverLog}.err)\n`);
-      process.stdout.write(`  scratch dir: ${scratch}\n`);
-    } else if (options.keep && serverExit) {
+    } else if (options.keep) {
       process.stdout.write(`\n  --keep: nothing to keep, the server already exited (${serverExit})\n`);
     }
-    await cleanup({ keepScratch: options.keep && Boolean(server) && !serverExit });
+    if (options.keep) process.stdout.write(`  scratch dir: ${scratch} (server logs: ${serverLog}.err)\n`);
+    await cleanup({ keepScratch: options.keep });
   }
 
   return finish();

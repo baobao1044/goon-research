@@ -47,6 +47,8 @@ mark.gx-hit.is-active{background:var(--accent);color:var(--accent-ink)}
 .gx-copy{position:absolute;top:6px;right:6px;opacity:0;border:1px solid var(--line-2);background:var(--surface-2);color:var(--ink-3);font:9.5px var(--mono);padding:3px 6px;cursor:pointer;transition:opacity var(--t-1) var(--ease-snap)}
 pre:hover>.gx-copy,.gx-copy:focus-visible,.gx-copy.is-done{opacity:1;color:var(--accent);border-color:var(--ink-3)}
 .session.is-active{border-left-color:var(--accent);color:var(--ink);background:var(--surface-2)}
+.session.is-noreplay .title{color:var(--ink-3)}
+.session.is-noreplay{cursor:default}
 @media (prefers-reduced-motion:reduce){.gx-overlay.is-open,.gx-panel,.gx-sheet,.gx-toast,.gx-banner.is-on,.gx-find.is-on{animation-duration:1ms!important}}
 `;
 // CSP allows style-src 'self' only, so an inline <style> would be dropped. A constructable
@@ -617,7 +619,16 @@ function sessionRow(session){
     copy.textContent="ok";
     setTimeout(()=>{copy.textContent="id";},1200);
   });
-  row.addEventListener("click",()=>startReplay(id));
+  // Event logging is opt-in, so most sessions have no log to walk. Say that on the row itself
+  // instead of letting the click produce an error toast and an empty transcript.
+  const replayable=session.hasEvents!==false;
+  if(!replayable){
+    row.classList.add("is-noreplay");
+    row.title="phiên này không có event log (chạy với --event-log để xem lại)";
+    row.addEventListener("click",()=>toast("phiên này không có event log — chạy lại với --event-log để xem lại","info"));
+  }else{
+    row.addEventListener("click",()=>startReplay(id));
+  }
   row.append(wrap,copy);
   return row;
 }

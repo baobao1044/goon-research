@@ -84,7 +84,10 @@ pub enum Incoming {
     Empty,
     Request(Box<Request>),
     /// The request broke a limit or was unparseable: answer with this status, then close.
-    Rejected { status: u16, message: &'static str },
+    Rejected {
+        status: u16,
+        message: &'static str,
+    },
 }
 
 enum LineError {

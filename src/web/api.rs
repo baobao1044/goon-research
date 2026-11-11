@@ -109,10 +109,22 @@ pub fn runs(state: &Arc<ServerState>) -> Value {
 }
 
 /// Session summaries, newest first, capped like the CLI's own listing.
+///
+/// `hasEvents` tells the window whether replay is possible at all: event logging is opt-in, so a
+/// session recorded without `--event-log` has no log to walk, and the UI must say that instead of
+/// showing an empty transcript.
 pub fn sessions(state: &Arc<ServerState>) -> Value {
     let dir = state.options.data_dir.join("sessions");
     match crate::session::SessionStore::list(&dir) {
-        Ok(list) => Value::Array(list.iter().take(50).map(|session| json!({"id": session.id, "title": session.title, "updatedAt": session.updated_at, "cwd": session.cwd, "model": session.model})).collect()),
+        Ok(list) => Value::Array(
+            list.iter()
+                .take(50)
+                .map(|session| {
+                    let has_events = crate::eventlog::event_log_path(&state.options.data_dir, &session.id).is_file();
+                    json!({"id": session.id, "title": session.title, "updatedAt": session.updated_at, "cwd": session.cwd, "model": session.model, "hasEvents": has_events})
+                })
+                .collect(),
+        ),
         Err(error) => json!({"error": error.to_string()}),
     }
 }
@@ -160,7 +172,12 @@ pub fn cancel(state: &Arc<ServerState>) -> Value {
 
 #[cfg(windows)]
 fn terminate(pid: u32) -> anyhow::Result<()> {
-    let status = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map_err(|error| anyhow::anyhow!("run taskkill: {error}"))?;
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| anyhow::anyhow!("run taskkill: {error}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -170,7 +187,12 @@ fn terminate(pid: u32) -> anyhow::Result<()> {
 
 #[cfg(not(windows))]
 fn terminate(pid: u32) -> anyhow::Result<()> {
-    let status = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map_err(|error| anyhow::anyhow!("run kill: {error}"))?;
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| anyhow::anyhow!("run kill: {error}"))?;
     if status.success() {
         Ok(())
     } else {

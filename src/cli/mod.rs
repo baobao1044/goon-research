@@ -644,7 +644,28 @@ async fn main_inner(argv: Vec<String>) -> Result<()> {
     }
     if first == Some("web") || first == Some("desktop") {
         let port = values.str("port").and_then(|raw| raw.parse::<u16>().ok()).unwrap_or(0);
-        let passthrough: Vec<String> = positionals.iter().skip(1).filter(|arg| arg.starts_with('-')).cloned().collect();
+        // Options parsed by the outer CLI would otherwise stop here: the window's child runs need
+        // them forwarded (`--event-log` is what makes session replay possible at all, and `--stub`
+        // is how the shell is exercised without a model).
+        let mut passthrough: Vec<String> = positionals.iter().skip(1).filter(|arg| arg.starts_with('-')).cloned().collect();
+        if values.flag("event-log") {
+            passthrough.push("--event-log".into());
+        }
+        if values.flag("stub") {
+            passthrough.push("--stub".into());
+        }
+        if let Some(fixture) = values.str("stub-fixture") {
+            passthrough.push("--stub-fixture".into());
+            passthrough.push(fixture.clone());
+        }
+        if let Some(model) = values.str("model") {
+            passthrough.push("--model".into());
+            passthrough.push(model.clone());
+        }
+        if let Some(effort) = values.str("effort") {
+            passthrough.push("--effort".into());
+            passthrough.push(effort.clone());
+        }
         let options = crate::web::WebOptions {
             port,
             open: !values.flag("no-open"),
